@@ -26,8 +26,9 @@ export class LiveClient {
   private nextStartTime: number = 0;
   private activeSources: Set<AudioBufferSourceNode> = new Set();
   
-  // Recording
+  // Recording Mastering Chain
   private recordingProcessor: ScriptProcessorNode | null = null;
+  private recordingCompressor: DynamicsCompressorNode | null = null;
   private recordedChunks: Float32Array[] = [];
   private isRecording: boolean = false;
 
@@ -121,6 +122,16 @@ export class LiveClient {
   private setupRecorder() {
     if (!this.outputAudioContext || !this.mediaStream) return;
 
+    // 1. Create a mastering chain for the recording to balance voice levels
+    this.recordingCompressor = this.outputAudioContext.createDynamicsCompressor();
+    // Configure for high-quality speech mastering
+    this.recordingCompressor.threshold.setValueAtTime(-24, this.outputAudioContext.currentTime);
+    this.recordingCompressor.knee.setValueAtTime(30, this.outputAudioContext.currentTime);
+    this.recordingCompressor.ratio.setValueAtTime(12, this.outputAudioContext.currentTime);
+    this.recordingCompressor.attack.setValueAtTime(0.003, this.outputAudioContext.currentTime);
+    this.recordingCompressor.release.setValueAtTime(0.25, this.outputAudioContext.currentTime);
+
+    // 2. Setup the processor that captures raw Float32 data
     this.recordingProcessor = this.outputAudioContext.createScriptProcessor(4096, 1, 1);
     this.recordedChunks = [];
     this.isRecording = true;
@@ -132,18 +143,22 @@ export class LiveClient {
       }
     };
 
+    // 3. Chain: Sources -> Compressor -> Processor
     const micSource = this.outputAudioContext.createMediaStreamSource(this.mediaStream);
     const micGain = this.outputAudioContext.createGain();
     micGain.gain.value = 1.0; 
     
     micSource.connect(micGain);
-    micGain.connect(this.recordingProcessor);
+    micGain.connect(this.recordingCompressor);
     
+    this.recordingCompressor.connect(this.recordingProcessor);
+    // Note: Processor needs a destination connection to keep ticking
     this.recordingProcessor.connect(this.outputAudioContext.destination);
   }
 
   public getSessionRecording(): globalThis.Blob | null {
     if (this.recordedChunks.length === 0) return null;
+    // Export at output sample rate (24k) for consistent voice quality
     return float32ToWav(this.recordedChunks, AUDIO_SAMPLE_RATE_OUTPUT);
   }
 
@@ -215,8 +230,6 @@ export class LiveClient {
     if (modelTranscriptChunk) {
        this.currentModelTurnText += modelTranscriptChunk;
        
-       let cleanChunk = modelTranscriptChunk;
-       
        if (!this.hasEmittedAnalysisForTurn) {
           const match = this.currentModelTurnText.match(ANALYSIS_REGEX);
           if (match) {
@@ -227,10 +240,7 @@ export class LiveClient {
           }
        }
 
-       // Optionally strip the analysis tags from the streaming transcript for the UI
-       // This is a simple heuristic: if we haven't reached the end of tags yet, we might be buffering
-       // For this implementation, we just pass the text and let the UI clean it using its existing regex
-       this.onTranscript(cleanChunk, false, !!message.serverContent?.turnComplete);
+       this.onTranscript(modelTranscriptChunk, false, !!message.serverContent?.turnComplete);
     }
 
     const groundingMetadata = message.serverContent?.groundingMetadata;
@@ -249,7 +259,7 @@ export class LiveClient {
   }
 
   private async playAudio(base64Data: string) {
-    if (!this.outputAudioContext || !this.outputAnalyser || !this.recordingProcessor) return;
+    if (!this.outputAudioContext || !this.outputAnalyser || !this.recordingCompressor) return;
 
     const bytes = decode(base64Data);
     const buffer = await decodeAudioData(bytes, this.outputAudioContext, AUDIO_SAMPLE_RATE_OUTPUT, 1);
@@ -260,7 +270,8 @@ export class LiveClient {
     source.buffer = buffer;
     
     source.connect(this.outputAnalyser);
-    source.connect(this.recordingProcessor);
+    // Connect AI response to the mastered recording chain
+    source.connect(this.recordingCompressor);
     
     source.addEventListener('ended', () => {
       this.activeSources.delete(source);
@@ -306,6 +317,10 @@ export class LiveClient {
     if (this.recordingProcessor) {
       this.recordingProcessor.disconnect();
       this.recordingProcessor = null;
+    }
+    if (this.recordingCompressor) {
+      this.recordingCompressor.disconnect();
+      this.recordingCompressor = null;
     }
     if (this.source) {
       this.source.disconnect();
