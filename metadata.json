@@ -1,0 +1,7 @@
+{
+  "name": "WillFlow - AI Confidence Coach",
+  "description": "A multimodal real-time voice coaching app for job interviews, language learning, and social confidence.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
