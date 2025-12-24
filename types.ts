@@ -17,7 +17,7 @@ export interface LanguageConfig {
   voiceName: string;
   color: string;
   icon: string;
-  promptName?: string; // Optional specific name for the system prompt (e.g., "Chinese (Mandarin)")
+  promptName?: string;
 }
 
 export interface TranscriptItem {
@@ -58,7 +58,7 @@ export interface Friend {
   isOnline: boolean;
   lastActive: string;
   level: number;
-  xp: number; // Added for leaderboard
+  xp: number;
 }
 
 export type DifficultyLevel = 'beginner' | 'intermediate' | 'advanced';
@@ -68,8 +68,8 @@ export interface SessionSettings {
   difficulty: DifficultyLevel;
   speed: SpeedLevel;
   voiceName: string;
-  language: string; // Added language selection
-  groupSize?: number; // Added for group conversation simulation (1-3 coaches)
+  language: string;
+  groupSize?: number;
 }
 
 export interface GrammarCorrection {
@@ -81,17 +81,16 @@ export interface GrammarCorrection {
 export interface SessionReport {
   durationSeconds: number;
   fillerWordCount: number;
-  awkwardPauseCount: number; // New metric
+  awkwardPauseCount: number;
+  hesitationScore: number; // Added metric
   fillerWordsPerMinute: number;
   transcript: TranscriptItem[]; 
-  dominantEmotion?: string; // New: Emotion analysis result
-  dominantIntent?: string; // New: Intent analysis result
-  
-  // Feedback Engine Metrics
+  dominantEmotion?: string;
+  dominantIntent?: string;
   grammarCorrections?: GrammarCorrection[];
-  fluencyScore?: number; // 0-100
-  vocabularyScore?: number; // 0-100
-  paceWPM?: number; // Words Per Minute
+  fluencyScore?: number;
+  vocabularyScore?: number;
+  paceWPM?: number;
   confidenceTips?: string[];
 }
 
@@ -99,11 +98,11 @@ export interface SessionHistoryItem {
   id: string;
   scenarioId: string;
   scenarioTitle: string;
-  date: string; // ISO String
+  date: string;
   durationSeconds: number;
   settings: SessionSettings;
   report: SessionReport;
-  status?: 'completed' | 'saved'; // New: status tracking
+  status?: 'completed' | 'saved';
 }
 
 export interface UserStats {
@@ -111,7 +110,7 @@ export interface UserStats {
   level: number;
   streak: number;
   sessionsCompleted: number;
-  lastSessionDate: string | null; // ISO Date string
+  lastSessionDate: string | null;
 }
 
 export interface User {
@@ -132,7 +131,6 @@ export interface Resource {
   xp: number;
   imageColor: string;
   icon: string;
-  // Dynamic AI Content
   description?: string;
   isGenerated?: boolean;
   content?: {

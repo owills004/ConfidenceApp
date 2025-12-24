@@ -16,6 +16,8 @@ interface ActiveSessionProps {
 }
 
 const FILLER_WORD_REGEX = new RegExp(`\\b(${FILLER_WORDS.join('|')})\\b`, 'gi');
+const TRAILING_CONJUNCTION_REGEX = /\b(and|but|so|because|or|which|that|who)\s*[,]?\s*$/i;
+const TERMINAL_PUNCTUATION_REGEX = /[.!?]\s*$/;
 const ANALYSIS_REGEX = /\[\[E:(\w+)\]\](?:\[\[I:(\w+)\]\])?/;
 
 const FLUENCY_TIPS = {
@@ -39,10 +41,9 @@ const getAdaptedSystemInstruction = (scenario: Scenario, settings: SessionSettin
   let instruction = scenario.systemInstruction;
   instruction += `\n\nLANGUAGE PROTOCOL: Speak in ${settings.language} exclusively.`;
   
-  // PATIENCE PROTOCOL: This helps the model not jump in too early
   instruction += `\n\nTURN-TAKING PROTOCOL:
   The user is practicing confidence. Be extremely patient. 
-  DO NOT interrupt the user if they pause for 2-3 seconds mid-sentence. 
+  DO NOT interrupt the user if they pause for 3-4 seconds mid-sentence or after a conjunction like "and" or "but". 
   Only respond when you are certain they have finished their thought or if they ask you a direct question. 
   Allow the silence to be a coaching moment.`;
 
@@ -90,24 +91,10 @@ const LiveVisualizer = React.memo(({ volumeRef, isActive, patienceProgress }: { 
     
     return (
         <div className="relative flex items-center justify-center">
-            {/* Patience Meter Ring */}
             <svg className="absolute w-24 h-24 -rotate-90 pointer-events-none">
+                <circle cx="48" cy="48" r="40" fill="none" stroke="currentColor" strokeWidth="2" className="text-slate-100" />
                 <circle
-                    cx="48"
-                    cy="48"
-                    r="40"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    className="text-slate-100"
-                />
-                <circle
-                    cx="48"
-                    cy="48"
-                    r="40"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="3"
+                    cx="48" cy="48" r="40" fill="none" stroke="currentColor" strokeWidth="3"
                     strokeDasharray={251.2}
                     strokeDashoffset={251.2 - (251.2 * patienceProgress)}
                     className="text-brand-500 transition-all duration-300 ease-linear opacity-40"
@@ -155,7 +142,12 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
     coachingTipTimeoutRef.current = window.setTimeout(() => setCoachingTip(null), duration);
   }, []);
 
-  // Sophisticated Silence and Turn-Ending Analysis
+  // Holistic Hesitation Score Calculation
+  useEffect(() => {
+    const score = (fillerCount * 2) + (awkwardPauseCount * 5);
+    setHesitationScore(score);
+  }, [fillerCount, awkwardPauseCount]);
+
   useEffect(() => {
     const VOLUME_MIN_THRESHOLD = 0.05;
     const checkActivity = () => {
@@ -163,7 +155,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
       const now = Date.now();
       const isInputActive = volumeRef.current.input > VOLUME_MIN_THRESHOLD;
       
-      // If user or AI is talking, they are active
       if (isInputActive || isSpeaking) {
         lastActiveTimeRef.current = now;
         setPatienceProgress(0);
@@ -171,30 +162,33 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
       }
 
       const silenceDuration = now - lastActiveTimeRef.current;
-      
-      // Calculate contextual threshold
-      // If last user transcript ends with punctuation, we wait less (they are likely done)
-      // If it ends with a word/comma, we wait more (they are likely thinking)
       const lastUserTranscript = [...transcripts].reverse().find(t => t.role === 'user')?.text || '';
-      const isSentenceFinished = /[.!?]\s*$/.test(lastUserTranscript);
       
-      const threshold = isSentenceFinished ? 2500 : 4500; // Natural break vs Thinking stall
+      const isSentenceFinished = TERMINAL_PUNCTUATION_REGEX.test(lastUserTranscript);
+      const isTrailing = TRAILING_CONJUNCTION_REGEX.test(lastUserTranscript);
       
-      // Update visual patience progress
+      // GRANULAR THRESHOLDS:
+      // 1. Finished thought: Short wait (2.5s) before AI might jump in.
+      // 2. Trailing conjunction ("and..."): Long wait (5s) because user is likely formulating.
+      // 3. Mid-sentence break: Medium wait (3.5s).
+      let threshold = isSentenceFinished ? 2500 : (isTrailing ? 5000 : 3500);
+      
       const progress = Math.min(silenceDuration / threshold, 1);
       setPatienceProgress(progress);
 
       if (silenceDuration > threshold) {
         if (!coachingTip || coachingTip.type !== 'hesitation') {
+            const isAwkward = !isSentenceFinished;
             const tipText = isSentenceFinished 
-                ? "Nice summary. Use this pause to prepare for the next question."
-                : FLUENCY_TIPS.pauses[Math.floor(Math.random() * FLUENCY_TIPS.pauses.length)];
+                ? "Good wrap-up. Use the pause to breathe."
+                : (isTrailing 
+                    ? "Stuck after '" + lastUserTranscript.match(TRAILING_CONJUNCTION_REGEX)?.[1] + "'? Try simplifying your point."
+                    : FLUENCY_TIPS.pauses[Math.floor(Math.random() * FLUENCY_TIPS.pauses.length)]);
             
             triggerTip(tipText, 'hesitation', 8000);
             
-            if (!isSentenceFinished) {
+            if (isAwkward) {
                 setAwkwardPauseCount(p => p + 1);
-                setHesitationScore(h => h + 5);
             }
             lastActiveTimeRef.current = now; 
         }
@@ -212,8 +206,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         const matches = text.match(FILLER_WORD_REGEX);
         if (matches) {
             setFillerCount(f => f + matches.length);
-            setHesitationScore(h => h + matches.length * 2);
-            if (Math.random() > 0.6) triggerTip(FILLER_WORDS[Math.floor(Math.random() * FILLER_WORDS.length)] + "? Focus on clear phrasing.", 'fluency');
+            if (Math.random() > 0.6) triggerTip("Try a silent pause instead of '" + matches[0] + "'.", 'fluency');
         }
     }
     setTranscripts(prev => {
@@ -244,7 +237,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
     try {
         const blob = clientRef.current?.getSessionRecording();
         if (!blob) throw new Error("No recording available");
-        
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -306,7 +298,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         </div>
       )}
 
-      {/* Header */}
       <div className={`p-4 border-b border-slate-100 flex items-center justify-between bg-white z-20 shrink-0`}>
         <div className="flex items-center gap-3">
             <div className={`w-10 h-10 rounded-full ${scenario.color} text-white flex items-center justify-center`}>
@@ -325,59 +316,42 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 onClick={downloadWav} 
                 disabled={isDownloading || status !== ConnectionStatus.CONNECTED}
                 className="bg-white text-slate-600 px-3 py-2 rounded-lg text-xs font-bold hover:bg-slate-50 border border-slate-200 flex items-center gap-2 transition-all disabled:opacity-50"
-                title="Download Practice Recording"
             >
-                {isDownloading ? (
-                    <i className="fa-solid fa-circle-notch animate-spin"></i>
-                ) : (
-                    <i className="fa-solid fa-download"></i>
-                )}
+                {isDownloading ? <i className="fa-solid fa-circle-notch animate-spin"></i> : <i className="fa-solid fa-download"></i>}
                 <span className="hidden sm:inline">Export Audio</span>
             </button>
             <button 
-                onClick={() => onEndSession({ durationSeconds: (Date.now() - startTime)/1000, fillerWordCount: fillerCount, awkwardPauseCount, fillerWordsPerMinute: fillerCount/((Date.now()-startTime)/60000), transcript: transcripts, dominantEmotion: currentEmotion }, true, clientRef.current?.getSessionRecording() || undefined)} 
-                className="bg-white text-slate-600 px-3 py-2 rounded-lg text-xs font-bold hover:bg-slate-50 border border-slate-200 transition-colors"
+                onClick={() => onEndSession({ durationSeconds: (Date.now() - startTime)/1000, fillerWordCount: fillerCount, awkwardPauseCount, hesitationScore, fillerWordsPerMinute: fillerCount/((Date.now()-startTime)/60000), transcript: transcripts, dominantEmotion: currentEmotion }, true, clientRef.current?.getSessionRecording() || undefined)} 
+                className="bg-white text-slate-600 px-3 py-2 rounded-lg text-xs font-bold hover:bg-slate-50 border border-slate-200"
             >
                 Save
             </button>
             <button 
-                onClick={() => { setIsAnalyzing(true); onEndSession({ durationSeconds: (Date.now() - startTime)/1000, fillerWordCount: fillerCount, awkwardPauseCount, fillerWordsPerMinute: fillerCount/((Date.now()-startTime)/60000), transcript: transcripts, dominantEmotion: currentEmotion }, false, clientRef.current?.getSessionRecording() || undefined); }} 
-                className="bg-red-50 text-red-600 px-4 py-2 rounded-lg text-xs font-bold hover:bg-red-100 transition-colors"
+                onClick={() => { setIsAnalyzing(true); onEndSession({ durationSeconds: (Date.now() - startTime)/1000, fillerWordCount: fillerCount, awkwardPauseCount, hesitationScore, fillerWordsPerMinute: fillerCount/((Date.now()-startTime)/60000), transcript: transcripts, dominantEmotion: currentEmotion }, false, clientRef.current?.getSessionRecording() || undefined); }} 
+                className="bg-red-50 text-red-600 px-4 py-2 rounded-lg text-xs font-bold hover:bg-red-100"
             >
                 Finish Session
             </button>
         </div>
       </div>
 
-      {/* Main View */}
       <div className="flex-1 relative flex flex-col min-h-0 bg-slate-50/30">
          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="w-64 h-64 md:w-80 md:h-80 relative flex flex-col items-center justify-center">
-                {/* Meta Badges */}
                 <div className="absolute -top-8 w-full flex justify-center gap-2 animate-fade-in-up z-30">
-                    <div className="bg-white/90 backdrop-blur px-2 py-0.5 rounded-full border border-slate-200 text-[10px] font-bold shadow-sm flex items-center gap-1 transition-all">
+                    <div className="bg-white/90 backdrop-blur px-2 py-0.5 rounded-full border border-slate-200 text-[10px] font-bold shadow-sm flex items-center gap-1">
                         <i className="fa-solid fa-face-smile text-brand-500"></i> {currentEmotion}
                     </div>
-                    <div className="bg-white/90 backdrop-blur px-2 py-0.5 rounded-full border border-slate-200 text-[10px] font-bold shadow-sm flex items-center gap-1 transition-all">
-                        <i className="fa-solid fa-bullseye text-blue-500"></i> {currentIntent}
+                    <div className="bg-white/90 backdrop-blur px-2 py-0.5 rounded-full border border-slate-200 text-[10px] font-bold shadow-sm flex items-center gap-1">
+                        <i className="fa-solid fa-brain text-purple-500"></i> Score: {hesitationScore}
                     </div>
                 </div>
-                {isSpeaking && (
-                    <>
-                        <div className="absolute inset-0 bg-brand-200 rounded-full animate-ping opacity-10"></div>
-                        <div className="absolute -inset-4 border-2 border-brand-100 rounded-full animate-pulse opacity-20"></div>
-                    </>
-                )}
+                {isSpeaking && <div className="absolute inset-0 bg-brand-200 rounded-full animate-ping opacity-10"></div>}
                 <LiveAvatar config={avatarConfig} volumeRef={volumeRef} isSpeaking={isSpeaking} />
             </div>
          </div>
 
-         <div 
-            ref={scrollRef} 
-            onScroll={handleScroll}
-            className="relative z-10 flex-1 overflow-y-auto p-6 space-y-4"
-            style={{ maskImage: 'linear-gradient(to bottom, transparent 0%, black 15%)' }}
-         >
+         <div ref={scrollRef} onScroll={handleScroll} className="relative z-10 flex-1 overflow-y-auto p-6 space-y-4" style={{ maskImage: 'linear-gradient(to bottom, transparent 0%, black 15%)' }}>
             {transcripts.map((t, idx) => (
                 <div key={idx} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
                     <div className={`max-w-[80%] rounded-2xl px-5 py-3 text-sm leading-relaxed shadow-sm ${t.role === 'user' ? 'bg-slate-900 text-white rounded-br-none' : 'bg-white border border-slate-200 text-slate-800 rounded-bl-none'}`}>
@@ -388,18 +362,17 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
             <div className="h-4"></div>
          </div>
 
-         {/* Subtle Footer Tooltip Area */}
          <div className="h-24 bg-white/80 backdrop-blur-md border-t border-slate-100 flex flex-col items-center justify-center shrink-0">
             <LiveVisualizer volumeRef={volumeRef} isActive={status === ConnectionStatus.CONNECTED} patienceProgress={patienceProgress} />
             <div className="h-8 flex items-center justify-center w-full">
                 {coachingTip ? (
-                    <div className="animate-fade-in-up flex items-center gap-2 px-4 py-1.5 rounded-full bg-brand-50 border border-brand-100 shadow-sm transition-all hover:scale-105">
+                    <div className="animate-fade-in-up flex items-center gap-2 px-4 py-1.5 rounded-full bg-brand-50 border border-brand-100 shadow-sm">
                         <i className={`fa-solid text-brand-600 text-[10px] ${coachingTip.type === 'hesitation' ? 'fa-hourglass' : 'fa-lightbulb'}`}></i>
                         <span className="text-xs font-bold text-slate-700">{coachingTip.text}</span>
                     </div>
                 ) : (
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest animate-fade-in">
-                        {status === ConnectionStatus.CONNECTED ? (patienceProgress > 0.5 ? 'AI is waiting for you to finish...' : 'Listening...') : 'Initializing AI Coach...'}
+                        {status === ConnectionStatus.CONNECTED ? (patienceProgress > 0.5 ? 'Wait, don\'t rush...' : 'Listening...') : 'Connecting AI...'}
                     </p>
                 )}
             </div>

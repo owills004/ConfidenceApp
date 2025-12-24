@@ -1,8 +1,8 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { User } from '../types';
 import { DEFAULT_USER_STATS } from '../constants';
-import { validateEmail, EmailValidationResult } from '../services/validation';
+import { validateEmailFormat, verifyDomainReputation, checkAccountExists, EmailValidationResult } from '../services/validation';
 
 interface AuthScreenProps {
   onComplete: (user: User) => void;
@@ -20,6 +20,8 @@ const AuthScreen: React.FC<AuthScreenProps> = ({ onComplete }) => {
   const [recoveryCode, setRecoveryCode] = useState('');
   
   const [emailValidation, setEmailValidation] = useState<EmailValidationResult>({ isValid: false });
+  const [isVerifyingEmail, setIsVerifyingEmail] = useState(false);
+  const [accountAlreadyExists, setAccountAlreadyExists] = useState(false);
   const [showValidationUI, setShowValidationUI] = useState(false);
   
   const [error, setError] = useState<string | null>(null);
@@ -29,28 +31,55 @@ const AuthScreen: React.FC<AuthScreenProps> = ({ onComplete }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
-  // Real-time validation effect
+  // Debounced real-time validation
+  const validationTimeoutRef = useRef<number | null>(null);
+
   useEffect(() => {
-    if (email.length > 0) {
-      const result = validateEmail(email);
-      setEmailValidation(result);
+    if (validationTimeoutRef.current) clearTimeout(validationTimeoutRef.current);
+    
+    if (email.length > 5) {
+      setIsVerifyingEmail(true);
+      setAccountAlreadyExists(false);
+      
+      validationTimeoutRef.current = window.setTimeout(async () => {
+        const result = await verifyDomainReputation(email);
+        setEmailValidation(result);
+        
+        // If domain is valid, check if account exists (only for signup)
+        if (result.isValid && view === 'signup') {
+            const exists = checkAccountExists(email);
+            setAccountAlreadyExists(exists);
+        }
+        
+        setIsVerifyingEmail(false);
+        setShowValidationUI(true);
+      }, 500);
     } else {
+      setIsVerifyingEmail(false);
       setEmailValidation({ isValid: false });
+      setAccountAlreadyExists(false);
       setShowValidationUI(false);
     }
-  }, [email]);
+
+    return () => {
+      if (validationTimeoutRef.current) clearTimeout(validationTimeoutRef.current);
+    };
+  }, [email, view]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSuccessMsg(null);
     
-    // Final deep validation
-    const validation = validateEmail(email);
-    if (!validation.isValid) {
-      setError(validation.error || 'Invalid email address.');
-      setShowValidationUI(true);
+    // Final check
+    if (!emailValidation.isValid) {
+      setError(emailValidation.error || 'Please provide a valid email.');
       return;
+    }
+
+    if (view === 'signup' && accountAlreadyExists) {
+        setError('An account with this email already exists.');
+        return;
     }
 
     setIsLoading(true);
@@ -69,9 +98,6 @@ const AuthScreen: React.FC<AuthScreenProps> = ({ onComplete }) => {
         if (cleanPassword.length < 6) throw new Error("Password must be at least 6 characters long.");
         if (cleanPassword !== confirmPassword) throw new Error("Passwords do not match.");
         
-        const existingUser = usersDb.find((u: any) => u.email.toLowerCase() === cleanEmail);
-        if (existingUser) throw new Error("An account with this email already exists.");
-
         const newUser: User = {
           id: Date.now().toString(),
           name: name.trim(),
@@ -199,26 +225,35 @@ const AuthScreen: React.FC<AuthScreenProps> = ({ onComplete }) => {
                             name="email"
                             autoComplete="email"
                             className={`w-full px-4 py-3 rounded-xl border outline-none transition-all bg-white text-slate-900 placeholder-slate-400 pr-10 ${
-                                showValidationUI && !emailValidation.isValid 
-                                ? 'border-red-300 bg-red-50/30' 
-                                : email.length > 0 && emailValidation.isValid 
-                                    ? 'border-green-300 bg-green-50/30' 
-                                    : 'border-slate-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-200'
+                                isVerifyingEmail 
+                                ? 'border-brand-300 ring-2 ring-brand-100'
+                                : showValidationUI && (!emailValidation.isValid || accountAlreadyExists)
+                                    ? 'border-red-300 bg-red-50/30' 
+                                    : email.length > 5 && emailValidation.isValid 
+                                        ? 'border-green-300 bg-green-50/30' 
+                                        : 'border-slate-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-200'
                             }`}
                             placeholder="you@example.com"
                             value={email}
-                            onBlur={() => setShowValidationUI(true)}
                             onChange={(e) => setEmail(e.target.value)}
                             disabled={view === 'reset-password'}
                         />
-                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                            {email.length > 0 && (
-                                emailValidation.isValid 
-                                ? <i className="fa-solid fa-circle-check text-green-500"></i>
-                                : <i className="fa-solid fa-circle-xmark text-red-400"></i>
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                            {isVerifyingEmail ? (
+                                <i className="fa-solid fa-circle-notch animate-spin text-brand-500"></i>
+                            ) : (
+                                <>
+                                    {email.length > 5 && showValidationUI && (
+                                        (emailValidation.isValid && !accountAlreadyExists)
+                                        ? <i className="fa-solid fa-circle-check text-green-500"></i>
+                                        : <i className="fa-solid fa-circle-xmark text-red-400"></i>
+                                    )}
+                                </>
                             )}
                         </div>
                     </div>
+                    
+                    {/* TYPO SUGGESTION */}
                     {emailValidation.suggestion && (
                         <button 
                             type="button"
@@ -229,10 +264,26 @@ const AuthScreen: React.FC<AuthScreenProps> = ({ onComplete }) => {
                             Did you mean {emailValidation.suggestion}?
                         </button>
                     )}
-                    {showValidationUI && !emailValidation.isValid && emailValidation.error && (
-                        <p className="mt-1 text-[11px] text-red-500 font-medium">
-                            {emailValidation.error}
-                        </p>
+
+                    {/* DOMAIN/ACCOUNT WARNINGS */}
+                    {showValidationUI && !isVerifyingEmail && (
+                        <>
+                            {accountAlreadyExists && view === 'signup' && (
+                                <p className="mt-1 text-[11px] text-red-500 font-bold flex items-center gap-1">
+                                    <i className="fa-solid fa-user-xmark"></i> This account already exists.
+                                </p>
+                            )}
+                            {!emailValidation.isValid && emailValidation.error && (
+                                <p className="mt-1 text-[11px] text-red-500 font-medium">
+                                    {emailValidation.error}
+                                </p>
+                            )}
+                            {emailValidation.isValid && emailValidation.domainReputation === 'medium' && (
+                                <p className="mt-1 text-[10px] text-slate-400 font-medium">
+                                    Using an unrecognized domain. Verification might be slower.
+                                </p>
+                            )}
+                        </>
                     )}
                 </div>
 
@@ -289,45 +340,9 @@ const AuthScreen: React.FC<AuthScreenProps> = ({ onComplete }) => {
                     </div>
                 )}
 
-                {view === 'reset-password' && (
-                    <>
-                        <div>
-                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Recovery Code</label>
-                            <input 
-                                type="text" 
-                                className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-200 outline-none transition-all bg-white text-slate-900 placeholder-slate-400"
-                                placeholder="Enter code from email"
-                                value={recoveryCode}
-                                onChange={(e) => setRecoveryCode(e.target.value)}
-                            />
-                        </div>
-                         <div>
-                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">New Password</label>
-                            <div className="relative">
-                                <input 
-                                    type={showPassword ? "text" : "password"} 
-                                    name="newPassword"
-                                    autoComplete="new-password"
-                                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-200 outline-none transition-all bg-white text-slate-900 placeholder-slate-400 pr-10"
-                                    placeholder="••••••••"
-                                    value={newPassword}
-                                    onChange={(e) => setNewPassword(e.target.value)}
-                                />
-                                <button
-                                    type="button"
-                                    onClick={() => setShowPassword(!showPassword)}
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-2"
-                                >
-                                    <i className={`fa-solid ${showPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
-                                </button>
-                            </div>
-                        </div>
-                    </>
-                )}
-
                 <button 
                     type="submit" 
-                    disabled={isLoading || (view === 'signup' && !emailValidation.isValid && email.length > 0)}
+                    disabled={isLoading || isVerifyingEmail || (view === 'signup' && (!emailValidation.isValid || accountAlreadyExists))}
                     className={`w-full py-4 rounded-xl text-white font-bold text-lg shadow-lg shadow-brand-200 transition-all transform active:scale-95 flex items-center justify-center gap-2 ${isLoading ? 'bg-brand-400 cursor-wait' : 'bg-brand-600 hover:bg-brand-700 hover:-translate-y-1 disabled:opacity-50 disabled:translate-y-0 disabled:shadow-none'}`}
                 >
                     {isLoading ? (
