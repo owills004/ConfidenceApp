@@ -61,9 +61,9 @@ export const SCENARIOS: Scenario[] = [
     description: 'Master pronunciation and grammar in English, Spanish, French, and more.',
     icon: 'fa-language',
     color: 'bg-indigo-600',
-    voiceName: 'Puck', // Default, will be overridden by selection
+    voiceName: 'Puck',
     category: 'Learning',
-    systemInstruction: '' // Default, will be overridden by selection
+    systemInstruction: ''
   },
   {
     id: 'social',
@@ -168,5 +168,4 @@ export const DEFAULT_SESSION_SETTINGS: SessionSettings = {
   speed: 'normal',
   voiceName: 'Puck',
   language: 'English',
-  groupSize: 1 // Default to 1-on-1
 };

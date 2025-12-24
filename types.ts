@@ -69,7 +69,6 @@ export interface SessionSettings {
   speed: SpeedLevel;
   voiceName: string;
   language: string;
-  groupSize?: number;
 }
 
 export interface GrammarCorrection {
@@ -82,7 +81,7 @@ export interface SessionReport {
   durationSeconds: number;
   fillerWordCount: number;
   awkwardPauseCount: number;
-  hesitationScore: number; // Added metric
+  hesitationScore: number;
   fillerWordsPerMinute: number;
   transcript: TranscriptItem[]; 
   dominantEmotion?: string;
