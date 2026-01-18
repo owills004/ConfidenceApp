@@ -7,8 +7,10 @@ export type TranscriptCallback = (text: string, isUser: boolean, isFinal: boolea
 export type VolumeCallback = (inputVolume: number, outputVolume: number) => void;
 export type GroundingCallback = (metadata: any) => void;
 export type AnalysisCallback = (emotion: string, intent: string) => void;
+export type BreathCallback = (phase: 'IN' | 'HOLD' | 'OUT' | 'END') => void;
 
 const ANALYSIS_REGEX = /\[\[E:(\w+)\]\](?:\[\[I:(\w+)\]\])?/;
+const BREATH_REGEX = /\[\[B:(\w+)\]\]/;
 
 export class LiveClient {
   private ai: GoogleGenAI;
@@ -41,6 +43,7 @@ export class LiveClient {
   private onVolume: VolumeCallback;
   private onGrounding: GroundingCallback;
   private onAnalysis: AnalysisCallback;
+  private onBreath: BreathCallback;
   private onClose: () => void;
   private onError: (err: Error) => void;
 
@@ -52,6 +55,7 @@ export class LiveClient {
     onVolume: VolumeCallback,
     onGrounding: GroundingCallback,
     onAnalysis: AnalysisCallback,
+    onBreath: BreathCallback,
     onClose: () => void,
     onError: (err: Error) => void
   ) {
@@ -60,6 +64,7 @@ export class LiveClient {
     this.onVolume = onVolume;
     this.onGrounding = onGrounding;
     this.onAnalysis = onAnalysis;
+    this.onBreath = onBreath;
     this.onClose = onClose;
     this.onError = onError;
   }
@@ -230,6 +235,14 @@ export class LiveClient {
     if (modelTranscriptChunk) {
        this.currentModelTurnText += modelTranscriptChunk;
        
+       // Handle Breath Tags
+       const breathMatch = this.currentModelTurnText.match(BREATH_REGEX);
+       if (breathMatch) {
+         this.onBreath(breathMatch[1] as any);
+         // Clear tag so it doesn't match again immediately in this turn
+         this.currentModelTurnText = this.currentModelTurnText.replace(BREATH_REGEX, '');
+       }
+
        if (!this.hasEmittedAnalysisForTurn) {
           const match = this.currentModelTurnText.match(ANALYSIS_REGEX);
           if (match) {

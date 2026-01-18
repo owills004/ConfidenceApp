@@ -4,6 +4,7 @@ import { Scenario, TranscriptItem, ConnectionStatus, AvatarConfig, SessionReport
 import { LiveClient } from '../services/liveClient';
 import AudioVisualizer from './AudioVisualizer';
 import Avatar from './Avatar';
+import BreathingGuide from './BreathingGuide';
 import { FILLER_WORDS } from '../constants';
 
 interface ActiveSessionProps {
@@ -27,6 +28,9 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
   const [awkwardPauseCount, setAwkwardPauseCount] = useState<number>(0);
   const lastActivityRef = useRef<number>(Date.now());
 
+  // Breathing Exercise State
+  const [breathPhase, setBreathPhase] = useState<'IN' | 'HOLD' | 'OUT' | 'END'>('END');
+
   const clientRef = useRef<LiveClient | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
@@ -34,25 +38,29 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
   const handleTranscript = useCallback((text: string, isUser: boolean, isFinal: boolean) => {
     if (!mountedRef.current) return;
     
+    // Clean text from tags
+    const cleanText = text.replace(/\[\[B:\w+\]\]/g, '').replace(/\[\[E:\w+\]\]/g, '').replace(/\[\[I:\w+\]\]/g, '').trim();
+    if (!cleanText) return;
+
     if (isUser) {
         lastActivityRef.current = Date.now();
-        const matches = text.match(FILLER_WORD_REGEX);
+        const matches = cleanText.match(FILLER_WORD_REGEX);
         if (matches) setFillerCount(f => f + matches.length);
 
         setTranscripts(prev => {
             const last = prev[prev.length - 1];
             if (last && last.role === 'user') {
-                return [...prev.slice(0, -1), { ...last, text: last.text + (text.startsWith(' ') ? text : ' ' + text) }];
+                return [...prev.slice(0, -1), { ...last, text: last.text + (cleanText.startsWith(' ') ? cleanText : ' ' + cleanText) }];
             }
-            return [...prev, { id: Date.now().toString(), role: 'user', text, timestamp: Date.now() }];
+            return [...prev, { id: Date.now().toString(), role: 'user', text: cleanText, timestamp: Date.now() }];
         });
     } else {
         setTranscripts(prev => {
             const last = prev[prev.length - 1];
             if (last && last.role === 'model') {
-                return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+                return [...prev.slice(0, -1), { ...last, text: last.text + cleanText }];
             }
-            return [...prev, { id: Date.now().toString(), role: 'model', text, timestamp: Date.now() }];
+            return [...prev, { id: Date.now().toString(), role: 'model', text: cleanText, timestamp: Date.now() }];
         });
         setIsSpeaking(true);
         if ((window as any).speakTimeout) clearTimeout((window as any).speakTimeout);
@@ -66,7 +74,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
     const PAUSE_THRESHOLD_MS = 3800; // ~4 seconds is considered an awkward pause in conversation
 
     const interval = setInterval(() => {
-      if (status !== ConnectionStatus.CONNECTED || isSpeaking) {
+      if (status !== ConnectionStatus.CONNECTED || isSpeaking || breathPhase !== 'END') {
         lastActivityRef.current = Date.now();
         return;
       }
@@ -84,7 +92,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
     }, 200);
 
     return () => clearInterval(interval);
-  }, [status, isSpeaking]);
+  }, [status, isSpeaking, breathPhase]);
 
   useEffect(() => {
     const init = async () => {
@@ -96,6 +104,9 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         },
         () => {}, // onGrounding
         () => {}, // onAnalysis
+        (phase) => {
+            if (mountedRef.current) setBreathPhase(phase);
+        },
         () => { if (mountedRef.current) setStatus(ConnectionStatus.DISCONNECTED); },
         (err) => { 
             if (mountedRef.current) setStatus(ConnectionStatus.ERROR);
@@ -125,8 +136,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
     const apm = awkwardPauseCount / durationMinutes;
     
     // Sophisticated Hesitation Score Calculation
-    // We weight pauses more heavily than filler words as they are more disruptive.
-    // Indexing against duration ensures fairness across session lengths.
     const hesitationScore = Math.round((fpm * 1.5) + (apm * 5.5));
     
     onEndSession({ 
@@ -141,6 +150,10 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
 
   return (
     <div className="flex flex-col h-[650px] bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden relative">
+      
+      {/* Visual Breathing Exercise Overlay */}
+      <BreathingGuide phase={breathPhase} />
+
       <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-white z-20 shrink-0">
         <div className="flex items-center gap-3">
             <div className={`w-10 h-10 rounded-full ${scenario.color} text-white flex items-center justify-center`}>
@@ -150,7 +163,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 <h3 className="font-bold text-slate-900 leading-tight">{scenario.title}</h3>
                 <div className="flex items-center gap-2 text-[10px] text-slate-500 font-bold uppercase tracking-wider">
                     <div className={`w-2 h-2 rounded-full ${status === ConnectionStatus.CONNECTED ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`}></div>
-                    {status}
+                    {breathPhase !== 'END' ? 'Calming Exercise' : status}
                 </div>
             </div>
         </div>
@@ -185,7 +198,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
          <div className="h-24 bg-white/80 backdrop-blur-md border-t border-slate-100 flex flex-col items-center justify-center shrink-0">
             <AudioVisualizer volume={volumeRef.current.input} isActive={status === ConnectionStatus.CONNECTED} />
             <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest font-mono mt-2">
-                {isSpeaking ? 'Coach Speaking' : 'Listening...'}
+                {breathPhase !== 'END' ? 'Breathe with your Coach' : isSpeaking ? 'Coach Speaking' : 'Listening...'}
             </p>
          </div>
       </div>
