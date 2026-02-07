@@ -35,34 +35,80 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
   const [startTime] = useState<number>(Date.now());
   const [isSpeaking, setIsSpeaking] = useState(false);
   
+  // Metrics
   const [fillerCount, setFillerCount] = useState<number>(0);
   const [awkwardPauseCount, setAwkwardPauseCount] = useState<number>(0);
   const [pronunciationTips, setPronunciationTips] = useState<{word: string, correction: string, id: string}[]>([]);
   const [perception, setPerception] = useState<{emotion: string, intent: string} | null>(null);
+  
+  // Real-time Visual Alerts
+  const [showFillerAlert, setShowFillerAlert] = useState(false);
+  const [showPauseAlert, setShowPauseAlert] = useState(false);
+  const fillerAlertTimeoutRef = useRef<number | null>(null);
+  const pauseAlertTimeoutRef = useRef<number | null>(null);
+
+  // Pagination & Scrolling
+  const [visibleCount, setVisibleCount] = useState(25);
+  const scrollAnchorRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const lastScrollHeightRef = useRef<number>(0);
+
   const lastActivityRef = useRef<number>(Date.now());
   const userWordsCountRef = useRef<number>(0);
-
-  // Track if we need to start a fresh bubble on the next chunk
   const lastTurnCompletedRef = useRef<boolean>(true);
-
-  // Breathing Exercise State
   const [breathPhase, setBreathPhase] = useState<'IN' | 'HOLD' | 'OUT' | 'END'>('END');
 
   const clientRef = useRef<LiveClient | null>(null);
-  const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
 
-  // Auto-scroll handler
+  // Auto-scroll to bottom on new messages if user is already near bottom
   useEffect(() => {
     if (scrollAnchorRef.current) {
-        scrollAnchorRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        const container = scrollContainerRef.current;
+        if (container) {
+            const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+            if (isNearBottom || transcripts.length <= visibleCount) {
+                scrollAnchorRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            }
+        }
     }
-  }, [transcripts]);
+  }, [transcripts, visibleCount]);
+
+  // Infinite Scroll Logic: Load more as user scrolls up
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+      const container = e.currentTarget;
+      if (container.scrollTop === 0 && transcripts.length > visibleCount) {
+          // Store current scroll height to prevent jumping
+          lastScrollHeightRef.current = container.scrollHeight;
+          setVisibleCount(prev => Math.min(prev + 20, transcripts.length));
+      }
+  };
+
+  // Adjust scroll position after loading older messages
+  useLayoutEffect(() => {
+      const container = scrollContainerRef.current;
+      if (container && lastScrollHeightRef.current > 0) {
+          const delta = container.scrollHeight - lastScrollHeightRef.current;
+          container.scrollTop = delta;
+          lastScrollHeightRef.current = 0;
+      }
+  }, [visibleCount]);
+
+  const triggerFillerAlert = () => {
+    setShowFillerAlert(true);
+    if (fillerAlertTimeoutRef.current) window.clearTimeout(fillerAlertTimeoutRef.current);
+    fillerAlertTimeoutRef.current = window.setTimeout(() => setShowFillerAlert(false), 2000);
+  };
+
+  const triggerPauseAlert = () => {
+    setShowPauseAlert(true);
+    if (pauseAlertTimeoutRef.current) window.clearTimeout(pauseAlertTimeoutRef.current);
+    pauseAlertTimeoutRef.current = window.setTimeout(() => setShowPauseAlert(false), 2000);
+  };
 
   const handleTranscript = useCallback((text: string, isUser: boolean, isFinal: boolean) => {
     if (!mountedRef.current) return;
     
-    // Clean tags but preserve spaces for proper sentence construction
     const cleanChunk = text.replace(TAG_CLEAN_REGEX, '');
     if (!cleanChunk.replace(/\s/g, '').length && !isFinal) return; 
 
@@ -72,11 +118,13 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         userWordsCountRef.current += words.length;
 
         const matches = cleanChunk.match(FILLER_WORD_REGEX);
-        if (matches) setFillerCount(f => f + matches.length);
+        if (matches) {
+            setFillerCount(f => f + matches.length);
+            triggerFillerAlert();
+        }
 
         setTranscripts(prev => {
             const last = prev[prev.length - 1];
-            // Only append if it's the same turn and user role
             if (last && last.role === 'user' && !lastTurnCompletedRef.current) {
                 return [...prev.slice(0, -1), { ...last, text: last.text + cleanChunk }];
             }
@@ -86,7 +134,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
 
         if (isFinal) lastTurnCompletedRef.current = true;
     } else {
-        // Parse Pronunciation Tip
         const tipMatch = cleanChunk.match(PRONUNCIATION_TIP_REGEX);
         if (tipMatch) {
             const word = tipMatch[1].trim();
@@ -99,7 +146,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
 
         setTranscripts(prev => {
             const last = prev[prev.length - 1];
-            // Only append to bubble if this model response is continuing the current bubble
             if (last && last.role === 'model' && !lastTurnCompletedRef.current) {
                 return [...prev.slice(0, -1), { ...last, text: last.text + cleanChunk }];
             }
@@ -108,8 +154,8 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         });
 
         setIsSpeaking(true);
-        if ((window as any).speakTimeout) clearTimeout((window as any).speakTimeout);
-        (window as any).speakTimeout = setTimeout(() => setIsSpeaking(false), 800);
+        if ((window as any).speakTimeout) window.clearTimeout((window as any).speakTimeout);
+        (window as any).speakTimeout = window.setTimeout(() => setIsSpeaking(false), 800);
 
         if (isFinal) lastTurnCompletedRef.current = true;
     }
@@ -117,16 +163,11 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
 
   useEffect(() => {
     const NOISE_THRESHOLD = 0.05;
-    const MID_SENTENCE_PAUSE_MS = 2400; 
-    const END_SENTENCE_PAUSE_MS = 4500; 
-    const RECOVERY_WINDOW = 300; 
-
     const interval = setInterval(() => {
       if (status !== ConnectionStatus.CONNECTED || isSpeaking || breathPhase !== 'END') {
         lastActivityRef.current = Date.now();
         return;
       }
-
       const isUserTalking = volumeRef.current.input > NOISE_THRESHOLD;
       if (isUserTalking) {
         lastActivityRef.current = Date.now();
@@ -134,14 +175,13 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         const silenceTime = Date.now() - lastActivityRef.current;
         const lastUserMsg = [...transcripts].reverse().find(t => t.role === 'user');
         const isEndOfThought = lastUserMsg ? /[.?!]$/.test(lastUserMsg.text.trim()) : true;
-        const currentThreshold = isEndOfThought ? END_SENTENCE_PAUSE_MS : MID_SENTENCE_PAUSE_MS;
-
-        if (silenceTime > currentThreshold && silenceTime < currentThreshold + RECOVERY_WINDOW) {
+        const currentThreshold = isEndOfThought ? 4500 : 2400;
+        if (silenceTime > currentThreshold && silenceTime < currentThreshold + 300) {
           setAwkwardPauseCount(c => c + 1);
+          triggerPauseAlert();
         }
       }
     }, 200);
-
     return () => clearInterval(interval);
   }, [status, isSpeaking, breathPhase, transcripts]);
 
@@ -150,22 +190,13 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
       clientRef.current = new LiveClient(
         process.env.API_KEY || '',
         handleTranscript,
-        (inV, outV) => { 
-            volumeRef.current = { input: inV, output: outV }; 
-        },
+        (inV, outV) => { volumeRef.current = { input: inV, output: outV }; },
         () => {}, 
-        (emotion, intent) => {
-            if (mountedRef.current) setPerception({ emotion, intent });
-        },
-        (phase) => {
-            if (mountedRef.current) setBreathPhase(phase);
-        },
+        (emotion, intent) => { if (mountedRef.current) setPerception({ emotion, intent }); },
+        (phase) => { if (mountedRef.current) setBreathPhase(phase); },
         () => { if (mountedRef.current) setStatus(ConnectionStatus.DISCONNECTED); },
-        (err) => { 
-            if (mountedRef.current) setStatus(ConnectionStatus.ERROR);
-        }
+        (err) => { if (mountedRef.current) setStatus(ConnectionStatus.ERROR); }
       );
-      
       await clientRef.current.connect(scenario.systemInstruction, sessionSettings.voiceName, sessionSettings.audioQuality || 'standard');
       if (mountedRef.current) setStatus(ConnectionStatus.CONNECTED);
     };
@@ -179,33 +210,26 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
   const handleFinish = () => {
     const durationSeconds = (Date.now() - startTime) / 1000;
     const durationMinutes = Math.max(durationSeconds / 60, 0.1);
-    const wpm = userWordsCountRef.current / durationMinutes;
-    const fpm = fillerCount / durationMinutes;
-    const apm = awkwardPauseCount / durationMinutes;
-    const paceModifier = wpm < 100 ? 1.2 : wpm > 160 ? 0.8 : 1.0;
-    const hesitationScore = Math.round(((fpm * 2.5) + (apm * 7.5)) * paceModifier);
-    
     onEndSession({ 
       durationSeconds, 
       fillerWordCount: fillerCount, 
       awkwardPauseCount, 
-      hesitationScore, 
-      fillerWordsPerMinute: Number(fpm.toFixed(1)), 
-      paceWPM: Math.round(wpm),
+      hesitationScore: Math.round(((fillerCount / durationMinutes) * 2.5) + ((awkwardPauseCount / durationMinutes) * 7.5)), 
+      fillerWordsPerMinute: Number((fillerCount / durationMinutes).toFixed(1)), 
+      paceWPM: Math.round(userWordsCountRef.current / durationMinutes),
       transcript: transcripts,
       dominantEmotion: perception?.emotion,
       dominantIntent: perception?.intent
     }, false, clientRef.current?.getSessionRecording() || undefined);
   };
 
-  const latestTip = pronunciationTips[0];
+  const displayedTranscripts = transcripts.slice(-visibleCount);
+  const hasMore = transcripts.length > visibleCount;
 
   return (
     <div className="flex flex-col lg:flex-row h-[750px] lg:h-[650px] bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden relative">
-      
       <BreathingGuide phase={breathPhase} />
 
-      {/* Main Conversation Area */}
       <div className="flex-1 flex flex-col min-w-0">
         <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-white z-20 shrink-0">
             <div className="flex items-center gap-3">
@@ -220,12 +244,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                     </div>
                 </div>
             </div>
-            <button 
-                onClick={handleFinish} 
-                className="bg-red-50 text-red-600 px-4 py-2 rounded-lg text-xs font-bold hover:bg-red-100 transition-colors"
-            >
-                End Session
-            </button>
+            <button onClick={handleFinish} className="bg-red-50 text-red-600 px-4 py-2 rounded-lg text-xs font-bold hover:bg-red-100 transition-colors">End Session</button>
         </div>
 
         <div className="flex-1 relative flex flex-col min-h-0 bg-slate-50/30 overflow-hidden">
@@ -244,19 +263,36 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 </div>
             )}
 
-            <div className="flex items-center justify-center py-6 pointer-events-none shrink-0">
-                <div className="w-32 h-32 sm:w-48 sm:h-48 relative">
+            <div className="absolute top-16 left-0 right-0 z-30 flex flex-col items-center gap-2 pointer-events-none">
+                {showFillerAlert && <div className="bg-orange-500 text-white text-[10px] font-black px-3 py-1 rounded-full shadow-lg animate-bounce uppercase tracking-widest">Filler Detected</div>}
+                {showPauseAlert && <div className="bg-red-500 text-white text-[10px] font-black px-3 py-1 rounded-full shadow-lg animate-pulse uppercase tracking-widest">Awkward Pause</div>}
+            </div>
+
+            <div className="flex items-center justify-center py-4 pointer-events-none shrink-0">
+                <div className="w-24 h-24 sm:w-32 sm:h-32 relative">
                     {isSpeaking && <div className="absolute inset-0 bg-brand-200 rounded-full animate-ping opacity-10"></div>}
                     <Avatar config={avatarConfig} isSpeaking={isSpeaking} />
                 </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-6 space-y-4 pb-20">
-                {transcripts.map((t, idx) => {
+            <div 
+                ref={scrollContainerRef}
+                onScroll={handleScroll}
+                className="flex-1 overflow-y-auto p-6 space-y-4"
+            >
+                {hasMore && (
+                    <div className="flex justify-center py-2">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-100 px-3 py-1 rounded-full animate-pulse">
+                            <i className="fa-solid fa-arrow-up mr-2"></i>
+                            Scroll up for more
+                        </span>
+                    </div>
+                )}
+                {displayedTranscripts.map((t, idx) => {
                     const cleanText = t.text.replace(PRONUNCIATION_TIP_REGEX, '').replace(TAG_CLEAN_REGEX, '').trim();
                     if (!cleanText) return null;
                     return (
-                        <div key={idx} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
+                        <div key={t.id || idx} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
                             <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm shadow-sm leading-relaxed ${
                                 t.role === 'user' ? 'bg-slate-900 text-white rounded-br-none' : 'bg-white border border-slate-200 text-slate-800 rounded-bl-none'
                             }`}>
@@ -268,7 +304,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 <div ref={scrollAnchorRef} className="h-1 w-full" />
             </div>
 
-            <div className="absolute bottom-0 left-0 right-0 h-24 bg-white/80 backdrop-blur-md border-t border-slate-100 flex flex-col items-center justify-center shrink-0 z-10">
+            <div className="shrink-0 bg-white border-t border-slate-100 flex flex-col items-center justify-center py-4">
                 <AudioVisualizer volume={volumeRef.current.input} isActive={status === ConnectionStatus.CONNECTED} />
                 <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest font-mono mt-2">
                     {breathPhase !== 'END' ? 'Breathe with your Coach' : isSpeaking ? 'Coach Speaking' : 'Listening...'}
@@ -277,7 +313,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         </div>
       </div>
 
-      {/* Coaching Insights Sidebar */}
       <div className="w-full lg:w-80 bg-slate-50 border-t lg:border-t-0 lg:border-l border-slate-200 flex flex-col shrink-0 overflow-hidden">
          <div className="p-4 bg-white border-b border-slate-200 shrink-0">
             <h4 className="font-bold text-slate-900 flex items-center gap-2">
@@ -285,20 +320,15 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 Fluency Metrics
             </h4>
          </div>
-         
          <div className="flex-1 overflow-y-auto p-4 space-y-6">
             <div className="grid grid-cols-2 gap-3">
-                <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm text-center">
+                <div className={`bg-white p-3 rounded-2xl border transition-all duration-300 shadow-sm text-center ${showFillerAlert ? 'border-orange-500 ring-2 ring-orange-100 scale-105' : 'border-slate-200'}`}>
                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Fillers</div>
-                    <div className={`text-2xl font-black ${fillerCount > 5 ? 'text-orange-500' : 'text-slate-800'}`}>
-                        {fillerCount}
-                    </div>
+                    <div className={`text-2xl font-black ${fillerCount > 5 ? 'text-orange-500' : 'text-slate-800'}`}>{fillerCount}</div>
                 </div>
-                <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm text-center">
+                <div className={`bg-white p-3 rounded-2xl border transition-all duration-300 shadow-sm text-center ${showPauseAlert ? 'border-red-500 ring-2 ring-red-100 scale-105' : 'border-slate-200'}`}>
                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Hesitations</div>
-                    <div className={`text-2xl font-black ${awkwardPauseCount > 2 ? 'text-red-500' : 'text-slate-800'}`}>
-                        {awkwardPauseCount}
-                    </div>
+                    <div className={`text-2xl font-black ${awkwardPauseCount > 2 ? 'text-red-500' : 'text-slate-800'}`}>{awkwardPauseCount}</div>
                 </div>
             </div>
 
@@ -307,75 +337,40 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                     <i className="fa-solid fa-ear-listen text-brand-500"></i>
                     Pronunciation Coach
                 </h5>
-
-                {latestTip ? (
+                {pronunciationTips.length > 0 ? (
                     <div className="animate-fade-in-up">
                         <div className="bg-gradient-to-br from-brand-600 to-indigo-700 p-4 rounded-2xl shadow-xl shadow-brand-100 text-white relative overflow-hidden ring-4 ring-white">
-                            <div className="absolute top-0 right-0 p-2 opacity-10">
-                                <i className="fa-solid fa-bullhorn text-4xl -rotate-12"></i>
-                            </div>
                             <div className="relative z-10">
                                 <div className="flex items-center justify-between mb-3 pb-2 border-b border-white/20">
-                                    <div className="text-xl font-black tracking-tight flex items-center gap-2">
-                                        <span className="text-brand-200">"</span>
-                                        {latestTip.word}
-                                        <span className="text-brand-200">"</span>
-                                    </div>
+                                    <div className="text-xl font-black tracking-tight">"{pronunciationTips[0].word}"</div>
                                     <span className="bg-white/20 text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest">Live Fix</span>
                                 </div>
                                 <div className="text-xs font-semibold leading-relaxed bg-white/10 p-3 rounded-xl border border-white/10 backdrop-blur-sm">
-                                    <i className="fa-solid fa-circle-info mr-2 text-brand-300"></i>
-                                    {latestTip.correction}
+                                    {pronunciationTips[0].correction}
                                 </div>
                             </div>
                         </div>
                     </div>
                 ) : (
                     <div className="text-center py-10 px-4 bg-white/50 border border-dashed border-slate-200 rounded-3xl text-slate-400">
-                        <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3 opacity-50">
-                            <i className="fa-solid fa-microphone-slash text-sm"></i>
-                        </div>
                         <p className="text-[10px] font-bold uppercase tracking-widest">Waiting for Speech</p>
-                        <p className="text-[9px] mt-1 opacity-60">I'll highlight mispronounced words here.</p>
                     </div>
                 )}
             </div>
 
             {pronunciationTips.length > 1 && (
                 <div className="animate-fade-in">
-                    <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
-                        <i className="fa-solid fa-history"></i>
-                        Previous Corrections
-                    </h5>
+                    <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2"><i className="fa-solid fa-history"></i> Previous Corrections</h5>
                     <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                         {pronunciationTips.slice(1).map((tip) => (
-                            <div key={tip.id} className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm border-l-4 border-l-brand-400 animate-fade-in">
-                                <div className="flex items-center justify-between mb-1">
-                                    <span className="text-xs font-black text-slate-800">"{tip.word}"</span>
-                                    <i className="fa-solid fa-check text-green-500 text-[10px] opacity-40"></i>
-                                </div>
-                                <p className="text-[10px] text-slate-500 leading-tight font-medium">
-                                    {tip.correction}
-                                </p>
+                            <div key={tip.id} className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm border-l-4 border-l-brand-400">
+                                <div className="flex items-center justify-between mb-1"><span className="text-xs font-black text-slate-800">"{tip.word}"</span></div>
+                                <p className="text-[10px] text-slate-500 leading-tight font-medium">{tip.correction}</p>
                             </div>
                         ))}
                     </div>
                 </div>
             )}
-
-            <div className="bg-slate-900 text-white p-4 rounded-2xl shadow-lg mt-auto">
-                <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-full bg-brand-500 flex items-center justify-center shrink-0">
-                        <i className="fa-solid fa-lightbulb text-xs"></i>
-                    </div>
-                    <div>
-                        <p className="text-[11px] font-bold text-brand-200 mb-1">Coach Strategy</p>
-                        <p className="text-[10px] text-slate-300 leading-relaxed italic">
-                            Don't worry about being perfect. Focus on the flow first, and we'll sharpen the sounds together.
-                        </p>
-                    </div>
-                </div>
-            </div>
          </div>
       </div>
     </div>
