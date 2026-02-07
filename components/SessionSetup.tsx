@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { Scenario, SessionSettings, DifficultyLevel, SpeedLevel, LanguageConfig } from '../types';
+import { Scenario, SessionSettings, DifficultyLevel, SpeedLevel, LanguageConfig, AudioQuality } from '../types';
 import { DIFFICULTY_OPTIONS, SPEED_OPTIONS, DEFAULT_SESSION_SETTINGS, VOICE_METADATA, LANGUAGES } from '../constants';
 
 interface SessionSetupProps {
@@ -14,6 +14,7 @@ const SessionSetup: React.FC<SessionSetupProps> = ({ scenario, onStart, onCancel
     ...DEFAULT_SESSION_SETTINGS,
     voiceName: scenario.voiceName,
     language: 'English',
+    audioQuality: 'standard',
   });
 
   const [selectedGender, setSelectedGender] = useState<'All' | 'Male' | 'Female'>('All');
@@ -32,6 +33,10 @@ const SessionSetup: React.FC<SessionSetupProps> = ({ scenario, onStart, onCancel
 
   const updateLanguage = (lang: LanguageConfig) => {
       setSettings(prev => ({ ...prev, language: lang.promptName || lang.name }));
+  };
+
+  const updateQuality = (quality: AudioQuality) => {
+      setSettings(prev => ({ ...prev, audioQuality: quality }));
   };
 
   const filteredVoices = Object.entries(VOICE_METADATA).filter(([name, meta]) => {
@@ -129,50 +134,57 @@ const SessionSetup: React.FC<SessionSetupProps> = ({ scenario, onStart, onCancel
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-            <label className="block text-sm font-bold text-slate-700 mb-4 flex items-center gap-2">
-                <i className="fa-solid fa-layer-group text-brand-500"></i>
-                Difficulty
-            </label>
-            <div className="space-y-2">
-                {DIFFICULTY_OPTIONS.map((opt) => (
-                <button
-                    key={opt.id}
-                    onClick={() => updateDifficulty(opt.id as DifficultyLevel)}
-                    className={`w-full p-3 rounded-xl border text-left transition-all ${
-                    settings.difficulty === opt.id 
-                        ? 'bg-brand-50 border-brand-500' 
-                        : 'bg-white border-slate-200'
-                    }`}
-                >
-                    <span className={`font-bold text-sm ${settings.difficulty === opt.id ? 'text-brand-700' : 'text-slate-700'}`}>
-                        {opt.label}
-                    </span>
-                </button>
-                ))}
-            </div>
+                <label className="block text-sm font-bold text-slate-700 mb-4 flex items-center gap-2">
+                    <i className="fa-solid fa-layer-group text-brand-500"></i>
+                    Difficulty
+                </label>
+                <div className="space-y-2">
+                    {DIFFICULTY_OPTIONS.map((opt) => (
+                    <button
+                        key={opt.id}
+                        onClick={() => updateDifficulty(opt.id as DifficultyLevel)}
+                        className={`w-full p-3 rounded-xl border text-left transition-all ${
+                        settings.difficulty === opt.id 
+                            ? 'bg-brand-50 border-brand-500' 
+                            : 'bg-white border-slate-200'
+                        }`}
+                    >
+                        <span className={`font-bold text-sm ${settings.difficulty === opt.id ? 'text-brand-700' : 'text-slate-700'}`}>
+                            {opt.label}
+                        </span>
+                    </button>
+                    ))}
+                </div>
             </div>
 
             <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-            <label className="block text-sm font-bold text-slate-700 mb-4 flex items-center gap-2">
-                <i className="fa-solid fa-gauge-high text-brand-500"></i>
-                Pace
-            </label>
-            <div className="flex flex-col gap-2">
-                {SPEED_OPTIONS.map((opt) => (
-                    <button
-                        key={opt.id}
-                        onClick={() => updateSpeed(opt.id as SpeedLevel)}
-                        className={`w-full p-3 rounded-xl border flex items-center gap-3 transition-all ${
-                            settings.speed === opt.id
-                            ? 'bg-brand-50 border-brand-500 text-brand-700'
-                            : 'bg-white border-slate-200 text-slate-600'
-                        }`}
-                    >
-                        <i className={`fa-solid ${opt.icon}`}></i>
-                        <span className="text-sm font-bold">{opt.label}</span>
-                    </button>
-                ))}
-            </div>
+                <label className="block text-sm font-bold text-slate-700 mb-4 flex items-center gap-2">
+                    <i className="fa-solid fa-sliders text-brand-500"></i>
+                    Recording Profile
+                </label>
+                <div className="space-y-2">
+                    {(['standard', 'studio'] as AudioQuality[]).map((q) => (
+                        <button
+                            key={q}
+                            onClick={() => updateQuality(q)}
+                            className={`w-full p-3 rounded-xl border text-left transition-all ${
+                                settings.audioQuality === q
+                                ? 'bg-brand-50 border-brand-500'
+                                : 'bg-white border-slate-200'
+                            }`}
+                        >
+                            <div className="flex items-center justify-between">
+                                <span className={`font-bold text-sm capitalize ${settings.audioQuality === q ? 'text-brand-700' : 'text-slate-700'}`}>
+                                    {q} Quality
+                                </span>
+                                {q === 'studio' && <i className="fa-solid fa-wand-magic-sparkles text-brand-400 text-xs"></i>}
+                            </div>
+                        </button>
+                    ))}
+                </div>
+                <p className="mt-3 text-[10px] text-slate-400 italic leading-relaxed">
+                    Studio profile applies advanced EQ and normalization for crystal-clear playback.
+                </p>
             </div>
         </div>
 

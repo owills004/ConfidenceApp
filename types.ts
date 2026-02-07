@@ -63,12 +63,14 @@ export interface Friend {
 
 export type DifficultyLevel = 'beginner' | 'intermediate' | 'advanced';
 export type SpeedLevel = 'slow' | 'normal' | 'fast';
+export type AudioQuality = 'standard' | 'studio';
 
 export interface SessionSettings {
   difficulty: DifficultyLevel;
   speed: SpeedLevel;
   voiceName: string;
   language: string;
+  audioQuality?: AudioQuality;
 }
 
 export interface GrammarCorrection {

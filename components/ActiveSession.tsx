@@ -17,7 +17,6 @@ interface ActiveSessionProps {
 
 const FILLER_WORD_REGEX = new RegExp(`\\b(${FILLER_WORDS.join('|')})\\b`, 'gi');
 const TAG_CLEAN_REGEX = /\[\[(E|I|B):[^\]]+\]\]/g;
-// Improved Regex to capture the word and the detailed correction instruction
 const PRONUNCIATION_TIP_REGEX = /Tip:\s*['"“]?([^'"“”]+)['"”]?\s*-\s*([^[\n\r\]]+)/i;
 
 const EMOTION_ICONS: Record<string, string> = {
@@ -43,43 +42,56 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
   const lastActivityRef = useRef<number>(Date.now());
   const userWordsCountRef = useRef<number>(0);
 
+  // Track if we need to start a fresh bubble on the next chunk
+  const lastTurnCompletedRef = useRef<boolean>(true);
+
   // Breathing Exercise State
   const [breathPhase, setBreathPhase] = useState<'IN' | 'HOLD' | 'OUT' | 'END'>('END');
 
   const clientRef = useRef<LiveClient | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
+
+  // Auto-scroll handler
+  useEffect(() => {
+    if (scrollAnchorRef.current) {
+        scrollAnchorRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+  }, [transcripts]);
 
   const handleTranscript = useCallback((text: string, isUser: boolean, isFinal: boolean) => {
     if (!mountedRef.current) return;
     
-    // Clean text from all tags including metadata
-    const cleanText = text.replace(TAG_CLEAN_REGEX, '').trim();
-    if (!cleanText) return;
+    // Clean tags but preserve spaces for proper sentence construction
+    const cleanChunk = text.replace(TAG_CLEAN_REGEX, '');
+    if (!cleanChunk.replace(/\s/g, '').length && !isFinal) return; 
 
     if (isUser) {
         lastActivityRef.current = Date.now();
-        const words = cleanText.split(/\s+/).filter(w => w.length > 0);
+        const words = cleanChunk.split(/\s+/).filter(w => w.length > 0);
         userWordsCountRef.current += words.length;
 
-        const matches = cleanText.match(FILLER_WORD_REGEX);
+        const matches = cleanChunk.match(FILLER_WORD_REGEX);
         if (matches) setFillerCount(f => f + matches.length);
 
         setTranscripts(prev => {
             const last = prev[prev.length - 1];
-            if (last && last.role === 'user') {
-                return [...prev.slice(0, -1), { ...last, text: last.text + (cleanText.startsWith(' ') ? cleanText : ' ' + cleanText) }];
+            // Only append if it's the same turn and user role
+            if (last && last.role === 'user' && !lastTurnCompletedRef.current) {
+                return [...prev.slice(0, -1), { ...last, text: last.text + cleanChunk }];
             }
-            return [...prev, { id: Date.now().toString(), role: 'user', text: cleanText, timestamp: Date.now() }];
+            lastTurnCompletedRef.current = false;
+            return [...prev, { id: Date.now().toString(), role: 'user', text: cleanChunk, timestamp: Date.now() }];
         });
+
+        if (isFinal) lastTurnCompletedRef.current = true;
     } else {
-        // Parse Pronunciation Tip if present in model output
-        const tipMatch = cleanText.match(PRONUNCIATION_TIP_REGEX);
+        // Parse Pronunciation Tip
+        const tipMatch = cleanChunk.match(PRONUNCIATION_TIP_REGEX);
         if (tipMatch) {
             const word = tipMatch[1].trim();
             const correction = tipMatch[2].trim();
             setPronunciationTips(prev => {
-                // Prevent duplicate tips for the same word in a row
                 if (prev.length > 0 && prev[0].word.toLowerCase() === word.toLowerCase()) return prev;
                 return [{ word, correction, id: Date.now().toString() }, ...prev].slice(0, 15); 
             });
@@ -87,18 +99,22 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
 
         setTranscripts(prev => {
             const last = prev[prev.length - 1];
-            if (last && last.role === 'model') {
-                return [...prev.slice(0, -1), { ...last, text: last.text + cleanText }];
+            // Only append to bubble if this model response is continuing the current bubble
+            if (last && last.role === 'model' && !lastTurnCompletedRef.current) {
+                return [...prev.slice(0, -1), { ...last, text: last.text + cleanChunk }];
             }
-            return [...prev, { id: Date.now().toString(), role: 'model', text: cleanText, timestamp: Date.now() }];
+            lastTurnCompletedRef.current = false;
+            return [...prev, { id: Date.now().toString(), role: 'model', text: cleanChunk, timestamp: Date.now() }];
         });
+
         setIsSpeaking(true);
         if ((window as any).speakTimeout) clearTimeout((window as any).speakTimeout);
         (window as any).speakTimeout = setTimeout(() => setIsSpeaking(false), 800);
+
+        if (isFinal) lastTurnCompletedRef.current = true;
     }
   }, []);
 
-  // Detect Awkward Pauses with Context Sensitivity
   useEffect(() => {
     const NOISE_THRESHOLD = 0.05;
     const MID_SENTENCE_PAUSE_MS = 2400; 
@@ -137,7 +153,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         (inV, outV) => { 
             volumeRef.current = { input: inV, output: outV }; 
         },
-        () => {}, // onGrounding
+        () => {}, 
         (emotion, intent) => {
             if (mountedRef.current) setPerception({ emotion, intent });
         },
@@ -150,7 +166,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         }
       );
       
-      await clientRef.current.connect(scenario.systemInstruction, sessionSettings.voiceName);
+      await clientRef.current.connect(scenario.systemInstruction, sessionSettings.voiceName, sessionSettings.audioQuality || 'standard');
       if (mountedRef.current) setStatus(ConnectionStatus.CONNECTED);
     };
     init();
@@ -158,11 +174,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
       mountedRef.current = false; 
       clientRef.current?.disconnect(); 
     };
-  }, [scenario.systemInstruction, sessionSettings.voiceName, handleTranscript]);
-
-  useLayoutEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [transcripts]);
+  }, [scenario.systemInstruction, sessionSettings.voiceName, sessionSettings.audioQuality, handleTranscript]);
 
   const handleFinish = () => {
     const durationSeconds = (Date.now() - startTime) / 1000;
@@ -216,7 +228,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
             </button>
         </div>
 
-        <div className="flex-1 relative flex flex-col min-h-0 bg-slate-50/30">
+        <div className="flex-1 relative flex flex-col min-h-0 bg-slate-50/30 overflow-hidden">
             {perception && (
                 <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 animate-fade-in-down pointer-events-none">
                     <div className="bg-white/80 backdrop-blur-md px-4 py-2 rounded-full shadow-lg border border-white flex items-center gap-3 ring-1 ring-slate-200/50">
@@ -232,21 +244,20 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 </div>
             )}
 
-            <div className="flex items-center justify-center py-8 pointer-events-none">
-                <div className="w-40 h-40 sm:w-56 sm:h-56 relative">
+            <div className="flex items-center justify-center py-6 pointer-events-none shrink-0">
+                <div className="w-32 h-32 sm:w-48 sm:h-48 relative">
                     {isSpeaking && <div className="absolute inset-0 bg-brand-200 rounded-full animate-ping opacity-10"></div>}
                     <Avatar config={avatarConfig} isSpeaking={isSpeaking} />
                 </div>
             </div>
 
-            <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4" style={{ maskImage: 'linear-gradient(to bottom, transparent 0%, black 15%)' }}>
+            <div className="flex-1 overflow-y-auto p-6 space-y-4 pb-20">
                 {transcripts.map((t, idx) => {
-                    // Hide raw pronunciation tips and tag system text from main chat for a cleaner UI
                     const cleanText = t.text.replace(PRONUNCIATION_TIP_REGEX, '').replace(TAG_CLEAN_REGEX, '').trim();
                     if (!cleanText) return null;
                     return (
                         <div key={idx} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
-                            <div className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm shadow-sm ${
+                            <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm shadow-sm leading-relaxed ${
                                 t.role === 'user' ? 'bg-slate-900 text-white rounded-br-none' : 'bg-white border border-slate-200 text-slate-800 rounded-bl-none'
                             }`}>
                                 {cleanText}
@@ -254,9 +265,10 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                         </div>
                     );
                 })}
+                <div ref={scrollAnchorRef} className="h-1 w-full" />
             </div>
 
-            <div className="h-24 bg-white/80 backdrop-blur-md border-t border-slate-100 flex flex-col items-center justify-center shrink-0">
+            <div className="absolute bottom-0 left-0 right-0 h-24 bg-white/80 backdrop-blur-md border-t border-slate-100 flex flex-col items-center justify-center shrink-0 z-10">
                 <AudioVisualizer volume={volumeRef.current.input} isActive={status === ConnectionStatus.CONNECTED} />
                 <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest font-mono mt-2">
                     {breathPhase !== 'END' ? 'Breathe with your Coach' : isSpeaking ? 'Coach Speaking' : 'Listening...'}
@@ -275,7 +287,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
          </div>
          
          <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            {/* Live Metrics Row */}
             <div className="grid grid-cols-2 gap-3">
                 <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm text-center">
                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Fillers</div>
@@ -291,7 +302,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 </div>
             </div>
 
-            {/* Pronunciation Correction Spotlight */}
             <div className="space-y-3">
                 <h5 className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2">
                     <i className="fa-solid fa-ear-listen text-brand-500"></i>
@@ -331,7 +341,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 )}
             </div>
 
-            {/* Historical Tips Scroll */}
             {pronunciationTips.length > 1 && (
                 <div className="animate-fade-in">
                     <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
@@ -354,7 +363,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                 </div>
             )}
 
-            {/* Motivational Anchor */}
             <div className="bg-slate-900 text-white p-4 rounded-2xl shadow-lg mt-auto">
                 <div className="flex items-start gap-3">
                     <div className="w-8 h-8 rounded-full bg-brand-500 flex items-center justify-center shrink-0">

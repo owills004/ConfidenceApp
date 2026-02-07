@@ -2,6 +2,7 @@
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { createBlob, decode, decodeAudioData, float32ToWav } from './audioUtils';
 import { AUDIO_SAMPLE_RATE_INPUT, AUDIO_SAMPLE_RATE_OUTPUT } from '../constants';
+import { AudioQuality } from '../types';
 
 export type TranscriptCallback = (text: string, isUser: boolean, isFinal: boolean) => void;
 export type VolumeCallback = (inputVolume: number, outputVolume: number) => void;
@@ -28,13 +29,16 @@ export class LiveClient {
   private nextStartTime: number = 0;
   private activeSources: Set<AudioBufferSourceNode> = new Set();
   
-  // Recording Mastering Chain
+  // Advanced Recording Mastering Chain
   private recordingProcessor: ScriptProcessorNode | null = null;
   private recordingHighPass: BiquadFilterNode | null = null;
+  private recordingPresence: BiquadFilterNode | null = null; // Mid-boost for clarity
+  private recordingAir: BiquadFilterNode | null = null; // High-shelf for "shimmer"
   private recordingCompressor: DynamicsCompressorNode | null = null;
   private recordingLimiter: DynamicsCompressorNode | null = null;
   private recordedChunks: Float32Array[] = [];
   private isRecording: boolean = false;
+  private quality: AudioQuality = 'standard';
 
   // Analysis State
   private currentModelTurnText: string = '';
@@ -70,7 +74,8 @@ export class LiveClient {
     this.onError = onError;
   }
 
-  public async connect(systemInstruction: string, voiceName: string) {
+  public async connect(systemInstruction: string, voiceName: string, quality: AudioQuality = 'standard') {
+    this.quality = quality;
     try {
       this.inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: AUDIO_SAMPLE_RATE_INPUT,
@@ -82,11 +87,11 @@ export class LiveClient {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       this.inputAnalyser = this.inputAudioContext.createAnalyser();
-      this.inputAnalyser.fftSize = 256;
+      this.inputAnalyser.fftSize = this.quality === 'studio' ? 512 : 256;
       this.inputAnalyser.smoothingTimeConstant = 0.1;
 
       this.outputAnalyser = this.outputAudioContext.createAnalyser();
-      this.outputAnalyser.fftSize = 256;
+      this.outputAnalyser.fftSize = this.quality === 'studio' ? 512 : 256;
       this.outputAnalyser.smoothingTimeConstant = 0.1;
       this.outputAnalyser.connect(this.outputAudioContext.destination);
 
@@ -129,26 +134,44 @@ export class LiveClient {
     if (!this.outputAudioContext || !this.mediaStream) return;
 
     const now = this.outputAudioContext.currentTime;
+    const isStudio = this.quality === 'studio';
 
+    // 1. High Pass Filter - Remove sub-80Hz noise
     this.recordingHighPass = this.outputAudioContext.createBiquadFilter();
     this.recordingHighPass.type = 'highpass';
-    this.recordingHighPass.frequency.setValueAtTime(80, now);
+    this.recordingHighPass.frequency.setValueAtTime(isStudio ? 90 : 80, now);
     this.recordingHighPass.Q.setValueAtTime(0.7, now);
 
+    // 2. Presence Filter - Boost mid-highs (3kHz) for vocal clarity
+    this.recordingPresence = this.outputAudioContext.createBiquadFilter();
+    this.recordingPresence.type = 'peaking';
+    this.recordingPresence.frequency.setValueAtTime(3200, now);
+    this.recordingPresence.gain.setValueAtTime(isStudio ? 3.5 : 2.0, now);
+    this.recordingPresence.Q.setValueAtTime(1.0, now);
+
+    // 3. Air Filter - High shelf for professional "shimmer" (10kHz+)
+    this.recordingAir = this.outputAudioContext.createBiquadFilter();
+    this.recordingAir.type = 'highshelf';
+    this.recordingAir.frequency.setValueAtTime(10000, now);
+    this.recordingAir.gain.setValueAtTime(isStudio ? 4.0 : 1.5, now);
+
+    // 4. Vocal Compressor - Tighten dynamics
     this.recordingCompressor = this.outputAudioContext.createDynamicsCompressor();
-    this.recordingCompressor.threshold.setValueAtTime(-18, now);
+    this.recordingCompressor.threshold.setValueAtTime(isStudio ? -24 : -18, now);
     this.recordingCompressor.knee.setValueAtTime(12, now);
-    this.recordingCompressor.ratio.setValueAtTime(4, now);
-    this.recordingCompressor.attack.setValueAtTime(0.01, now);
+    this.recordingCompressor.ratio.setValueAtTime(isStudio ? 5 : 4, now);
+    this.recordingCompressor.attack.setValueAtTime(0.005, now);
     this.recordingCompressor.release.setValueAtTime(0.2, now);
 
+    // 5. Mastering Limiter - Protect from clipping
     this.recordingLimiter = this.outputAudioContext.createDynamicsCompressor();
-    this.recordingLimiter.threshold.setValueAtTime(-2, now);
+    this.recordingLimiter.threshold.setValueAtTime(-1.5, now);
     this.recordingLimiter.knee.setValueAtTime(0, now);
     this.recordingLimiter.ratio.setValueAtTime(20, now);
     this.recordingLimiter.attack.setValueAtTime(0.001, now);
     this.recordingLimiter.release.setValueAtTime(0.05, now);
 
+    // Capture Processor
     this.recordingProcessor = this.outputAudioContext.createScriptProcessor(2048, 1, 1);
     this.recordedChunks = [];
     this.isRecording = true;
@@ -160,13 +183,16 @@ export class LiveClient {
       }
     };
 
+    // Routing: Mic -> Gain -> HPF -> Presence -> Air -> Compressor -> Limiter -> Capture
     const micSource = this.outputAudioContext.createMediaStreamSource(this.mediaStream);
     const micGain = this.outputAudioContext.createGain();
     micGain.gain.value = 1.0; 
     
     micSource.connect(micGain);
     micGain.connect(this.recordingHighPass);
-    this.recordingHighPass.connect(this.recordingCompressor);
+    this.recordingHighPass.connect(this.recordingPresence);
+    this.recordingPresence.connect(this.recordingAir);
+    this.recordingAir.connect(this.recordingCompressor);
     this.recordingCompressor.connect(this.recordingLimiter);
     this.recordingLimiter.connect(this.recordingProcessor);
     this.recordingProcessor.connect(this.outputAudioContext.destination);
@@ -175,6 +201,7 @@ export class LiveClient {
   public getSessionRecording(): globalThis.Blob | null {
     if (this.recordedChunks.length === 0) return null;
 
+    // Advanced Peak Normalization
     let maxVal = 0;
     for (const chunk of this.recordedChunks) {
       for (let i = 0; i < chunk.length; i++) {
@@ -183,7 +210,7 @@ export class LiveClient {
       }
     }
 
-    const targetPeak = 0.9;
+    const targetPeak = 0.95; // -0.5dB
     if (maxVal > 0) {
       const scale = targetPeak / maxVal;
       for (const chunk of this.recordedChunks) {
@@ -264,14 +291,12 @@ export class LiveClient {
     if (modelTranscriptChunk) {
        this.currentModelTurnText += modelTranscriptChunk;
        
-       // Detect and emit emotion/intent analysis from chunk
        let analysisMatch;
-       const analysisRegexClone = new RegExp(ANALYSIS_REGEX); // Reset index
+       const analysisRegexClone = new RegExp(ANALYSIS_REGEX);
        while ((analysisMatch = analysisRegexClone.exec(this.currentModelTurnText)) !== null) {
          this.onAnalysis(analysisMatch[1], analysisMatch[2] || 'Neutral');
        }
 
-       // Handle Breath Tags
        let breathMatch;
        const breathRegexClone = new RegExp(BREATH_REGEX);
        while ((breathMatch = breathRegexClone.exec(this.currentModelTurnText)) !== null) {
@@ -308,6 +333,7 @@ export class LiveClient {
     
     source.connect(this.outputAnalyser);
     
+    // Connect AI response to the recording mastering chain to include it in the final WAV
     if (this.recordingHighPass) {
       source.connect(this.recordingHighPass);
     }
@@ -360,6 +386,14 @@ export class LiveClient {
     if (this.recordingHighPass) {
       this.recordingHighPass.disconnect();
       this.recordingHighPass = null;
+    }
+    if (this.recordingPresence) {
+      this.recordingPresence.disconnect();
+      this.recordingPresence = null;
+    }
+    if (this.recordingAir) {
+      this.recordingAir.disconnect();
+      this.recordingAir = null;
     }
     if (this.recordingCompressor) {
       this.recordingCompressor.disconnect();
