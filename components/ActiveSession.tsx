@@ -17,6 +17,7 @@ interface ActiveSessionProps {
 
 const FILLER_WORD_REGEX = new RegExp(`\\b(${FILLER_WORDS.join('|')})\\b`, 'gi');
 const TAG_CLEAN_REGEX = /\[\[(E|I|B):[^\]]+\]\]/g;
+// Improved Regex to capture the word and the detailed correction instruction
 const PRONUNCIATION_TIP_REGEX = /Tip:\s*['"“]?([^'"“”]+)['"”]?\s*-\s*([^[\n\r\]]+)/i;
 
 const EMOTION_ICONS: Record<string, string> = {
@@ -40,6 +41,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
   const [pronunciationTips, setPronunciationTips] = useState<{word: string, correction: string, id: string}[]>([]);
   const [perception, setPerception] = useState<{emotion: string, intent: string} | null>(null);
   const lastActivityRef = useRef<number>(Date.now());
+  const userWordsCountRef = useRef<number>(0);
 
   // Breathing Exercise State
   const [breathPhase, setBreathPhase] = useState<'IN' | 'HOLD' | 'OUT' | 'END'>('END');
@@ -57,6 +59,9 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
 
     if (isUser) {
         lastActivityRef.current = Date.now();
+        const words = cleanText.split(/\s+/).filter(w => w.length > 0);
+        userWordsCountRef.current += words.length;
+
         const matches = cleanText.match(FILLER_WORD_REGEX);
         if (matches) setFillerCount(f => f + matches.length);
 
@@ -74,8 +79,9 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
             const word = tipMatch[1].trim();
             const correction = tipMatch[2].trim();
             setPronunciationTips(prev => {
+                // Prevent duplicate tips for the same word in a row
                 if (prev.length > 0 && prev[0].word.toLowerCase() === word.toLowerCase()) return prev;
-                return [{ word, correction, id: Date.now().toString() }, ...prev].slice(0, 10); 
+                return [{ word, correction, id: Date.now().toString() }, ...prev].slice(0, 15); 
             });
         }
 
@@ -92,10 +98,12 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
     }
   }, []);
 
-  // Detect Awkward Pauses
+  // Detect Awkward Pauses with Context Sensitivity
   useEffect(() => {
     const NOISE_THRESHOLD = 0.05;
-    const PAUSE_THRESHOLD_MS = 3800; 
+    const MID_SENTENCE_PAUSE_MS = 2400; 
+    const END_SENTENCE_PAUSE_MS = 4500; 
+    const RECOVERY_WINDOW = 300; 
 
     const interval = setInterval(() => {
       if (status !== ConnectionStatus.CONNECTED || isSpeaking || breathPhase !== 'END') {
@@ -108,14 +116,18 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         lastActivityRef.current = Date.now();
       } else {
         const silenceTime = Date.now() - lastActivityRef.current;
-        if (silenceTime > PAUSE_THRESHOLD_MS && silenceTime < PAUSE_THRESHOLD_MS + 300) {
+        const lastUserMsg = [...transcripts].reverse().find(t => t.role === 'user');
+        const isEndOfThought = lastUserMsg ? /[.?!]$/.test(lastUserMsg.text.trim()) : true;
+        const currentThreshold = isEndOfThought ? END_SENTENCE_PAUSE_MS : MID_SENTENCE_PAUSE_MS;
+
+        if (silenceTime > currentThreshold && silenceTime < currentThreshold + RECOVERY_WINDOW) {
           setAwkwardPauseCount(c => c + 1);
         }
       }
     }, 200);
 
     return () => clearInterval(interval);
-  }, [status, isSpeaking, breathPhase]);
+  }, [status, isSpeaking, breathPhase, transcripts]);
 
   useEffect(() => {
     const init = async () => {
@@ -155,9 +167,11 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
   const handleFinish = () => {
     const durationSeconds = (Date.now() - startTime) / 1000;
     const durationMinutes = Math.max(durationSeconds / 60, 0.1);
+    const wpm = userWordsCountRef.current / durationMinutes;
     const fpm = fillerCount / durationMinutes;
     const apm = awkwardPauseCount / durationMinutes;
-    const hesitationScore = Math.round((fpm * 1.5) + (apm * 5.5));
+    const paceModifier = wpm < 100 ? 1.2 : wpm > 160 ? 0.8 : 1.0;
+    const hesitationScore = Math.round(((fpm * 2.5) + (apm * 7.5)) * paceModifier);
     
     onEndSession({ 
       durationSeconds, 
@@ -165,6 +179,7 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
       awkwardPauseCount, 
       hesitationScore, 
       fillerWordsPerMinute: Number(fpm.toFixed(1)), 
+      paceWPM: Math.round(wpm),
       transcript: transcripts,
       dominantEmotion: perception?.emotion,
       dominantIntent: perception?.intent
@@ -176,7 +191,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
   return (
     <div className="flex flex-col lg:flex-row h-[750px] lg:h-[650px] bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden relative">
       
-      {/* Visual Breathing Exercise Overlay */}
       <BreathingGuide phase={breathPhase} />
 
       {/* Main Conversation Area */}
@@ -203,7 +217,6 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
         </div>
 
         <div className="flex-1 relative flex flex-col min-h-0 bg-slate-50/30">
-            {/* AI Perception Overlay */}
             {perception && (
                 <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 animate-fade-in-down pointer-events-none">
                     <div className="bg-white/80 backdrop-blur-md px-4 py-2 rounded-full shadow-lg border border-white flex items-center gap-3 ring-1 ring-slate-200/50">
@@ -228,7 +241,8 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
 
             <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4" style={{ maskImage: 'linear-gradient(to bottom, transparent 0%, black 15%)' }}>
                 {transcripts.map((t, idx) => {
-                    const cleanText = t.text.replace(PRONUNCIATION_TIP_REGEX, '').trim();
+                    // Hide raw pronunciation tips and tag system text from main chat for a cleaner UI
+                    const cleanText = t.text.replace(PRONUNCIATION_TIP_REGEX, '').replace(TAG_CLEAN_REGEX, '').trim();
                     if (!cleanText) return null;
                     return (
                         <div key={idx} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up`}>
@@ -253,15 +267,15 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
 
       {/* Coaching Insights Sidebar */}
       <div className="w-full lg:w-80 bg-slate-50 border-t lg:border-t-0 lg:border-l border-slate-200 flex flex-col shrink-0 overflow-hidden">
-         <div className="p-4 bg-white border-b border-slate-200">
+         <div className="p-4 bg-white border-b border-slate-200 shrink-0">
             <h4 className="font-bold text-slate-900 flex items-center gap-2">
-                <i className="fa-solid fa-chart-line text-brand-500"></i>
-                Session Insights
+                <i className="fa-solid fa-microphone-lines text-brand-500"></i>
+                Fluency Metrics
             </h4>
          </div>
          
          <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            {/* Live Metrics */}
+            {/* Live Metrics Row */}
             <div className="grid grid-cols-2 gap-3">
                 <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm text-center">
                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Fillers</div>
@@ -270,75 +284,86 @@ const ActiveSession: React.FC<ActiveSessionProps> = ({ scenario, avatarConfig, s
                     </div>
                 </div>
                 <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm text-center">
-                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Pauses</div>
+                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Hesitations</div>
                     <div className={`text-2xl font-black ${awkwardPauseCount > 2 ? 'text-red-500' : 'text-slate-800'}`}>
                         {awkwardPauseCount}
                     </div>
                 </div>
             </div>
 
-            {/* Pronunciation Spotlight */}
-            {latestTip && (
-                <div className="animate-fade-in-up">
-                    <div className="flex items-center justify-between mb-2">
-                         <h5 className="text-[10px] font-black text-brand-600 uppercase tracking-widest flex items-center gap-2">
-                            <span className="relative flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-brand-500"></span>
-                            </span>
-                            Live Correction
-                         </h5>
-                    </div>
-                    <div className="bg-gradient-to-br from-brand-600 to-indigo-700 p-4 rounded-2xl shadow-lg shadow-brand-100 text-white transform transition-transform hover:scale-[1.02]">
-                        <div className="flex items-center justify-between mb-2">
-                             <div className="text-lg font-black tracking-tight">"{latestTip.word}"</div>
-                             <i className="fa-solid fa-ear-listen opacity-50"></i>
-                        </div>
-                        <div className="text-xs font-medium leading-relaxed bg-white/10 p-2 rounded-lg border border-white/10">
-                            {latestTip.correction}
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Historical Tips Section */}
-            <div>
-                <h5 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-2">
-                    <i className="fa-solid fa-history text-slate-400"></i>
-                    Recent History
+            {/* Pronunciation Correction Spotlight */}
+            <div className="space-y-3">
+                <h5 className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                    <i className="fa-solid fa-ear-listen text-brand-500"></i>
+                    Pronunciation Coach
                 </h5>
-                
-                <div className="space-y-3">
-                    {pronunciationTips.length <= 1 && pronunciationTips.length === 0 ? (
-                        <div className="text-center py-8 px-4 bg-white/50 border border-dashed border-slate-200 rounded-2xl text-slate-400">
-                            <i className="fa-solid fa-microphone-slash mb-2 opacity-50"></i>
-                            <p className="text-[11px] font-medium italic">Speak to receive real-time pronunciation corrections.</p>
+
+                {latestTip ? (
+                    <div className="animate-fade-in-up">
+                        <div className="bg-gradient-to-br from-brand-600 to-indigo-700 p-4 rounded-2xl shadow-xl shadow-brand-100 text-white relative overflow-hidden ring-4 ring-white">
+                            <div className="absolute top-0 right-0 p-2 opacity-10">
+                                <i className="fa-solid fa-bullhorn text-4xl -rotate-12"></i>
+                            </div>
+                            <div className="relative z-10">
+                                <div className="flex items-center justify-between mb-3 pb-2 border-b border-white/20">
+                                    <div className="text-xl font-black tracking-tight flex items-center gap-2">
+                                        <span className="text-brand-200">"</span>
+                                        {latestTip.word}
+                                        <span className="text-brand-200">"</span>
+                                    </div>
+                                    <span className="bg-white/20 text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest">Live Fix</span>
+                                </div>
+                                <div className="text-xs font-semibold leading-relaxed bg-white/10 p-3 rounded-xl border border-white/10 backdrop-blur-sm">
+                                    <i className="fa-solid fa-circle-info mr-2 text-brand-300"></i>
+                                    {latestTip.correction}
+                                </div>
+                            </div>
                         </div>
-                    ) : (
-                        pronunciationTips.slice(1).map((tip) => (
-                            <div key={tip.id} className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm animate-fade-in border-l-4 border-l-slate-300">
+                    </div>
+                ) : (
+                    <div className="text-center py-10 px-4 bg-white/50 border border-dashed border-slate-200 rounded-3xl text-slate-400">
+                        <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3 opacity-50">
+                            <i className="fa-solid fa-microphone-slash text-sm"></i>
+                        </div>
+                        <p className="text-[10px] font-bold uppercase tracking-widest">Waiting for Speech</p>
+                        <p className="text-[9px] mt-1 opacity-60">I'll highlight mispronounced words here.</p>
+                    </div>
+                )}
+            </div>
+
+            {/* Historical Tips Scroll */}
+            {pronunciationTips.length > 1 && (
+                <div className="animate-fade-in">
+                    <h5 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                        <i className="fa-solid fa-history"></i>
+                        Previous Corrections
+                    </h5>
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                        {pronunciationTips.slice(1).map((tip) => (
+                            <div key={tip.id} className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm border-l-4 border-l-brand-400 animate-fade-in">
                                 <div className="flex items-center justify-between mb-1">
                                     <span className="text-xs font-black text-slate-800">"{tip.word}"</span>
-                                    <i className="fa-solid fa-check text-green-500 text-[10px] opacity-30"></i>
+                                    <i className="fa-solid fa-check text-green-500 text-[10px] opacity-40"></i>
                                 </div>
                                 <p className="text-[10px] text-slate-500 leading-tight font-medium">
                                     {tip.correction}
                                 </p>
                             </div>
-                        ))
-                    )}
+                        ))}
+                    </div>
                 </div>
-            </div>
+            )}
 
-            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+            {/* Motivational Anchor */}
+            <div className="bg-slate-900 text-white p-4 rounded-2xl shadow-lg mt-auto">
                 <div className="flex items-start gap-3">
-                    <div className="w-6 h-6 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center shrink-0 mt-0.5">
-                        <i className="fa-solid fa-lightbulb text-[10px]"></i>
+                    <div className="w-8 h-8 rounded-full bg-brand-500 flex items-center justify-center shrink-0">
+                        <i className="fa-solid fa-lightbulb text-xs"></i>
                     </div>
                     <div>
-                        <p className="text-[11px] font-bold text-slate-600 mb-1">Coach's Tip</p>
-                        <p className="text-[10px] text-slate-500 leading-relaxed italic">
-                            Confidence isn't just about what you say, it's about the steady rhythm of your speech. Try to match the Coach's pace.
+                        <p className="text-[11px] font-bold text-brand-200 mb-1">Coach Strategy</p>
+                        <p className="text-[10px] text-slate-300 leading-relaxed italic">
+                            Don't worry about being perfect. Focus on the flow first, and we'll sharpen the sounds together.
                         </p>
                     </div>
                 </div>
