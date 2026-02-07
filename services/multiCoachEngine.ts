@@ -20,7 +20,7 @@ export const processMultiCoachTurn = async (
   onProgress: (coach: 1 | 2 | 3) => void
 ): Promise<MultiCoachResponse> => {
   const ai = new GoogleGenAI({ apiKey });
-  const model = 'gemini-3-pro-preview';
+  const model = 'gemini-3-flash-preview'; // Speed optimization: use Flash instead of Pro
 
   // State initialization for sequential chain
   let coach1Text = "";
@@ -34,7 +34,8 @@ export const processMultiCoachTurn = async (
     contents: `Fluency Expert. Analyze ONLY the user's latest input: "${userInput}". 
     Focus on fillers, pauses, and pace. Speak directly to the user. Keep it brief (max 35 words).`,
     config: {
-      systemInstruction: "You are Coach 1, a Fluency Expert. You provide immediate feedback on speech flow."
+      systemInstruction: "You are Coach 1, a Fluency Expert. You provide immediate feedback on speech flow.",
+      thinkingConfig: { thinkingBudget: 0 } // Speed optimization
     }
   });
   coach1Text = c1Response.text || "I noticed some hesitation in your delivery.";
@@ -48,7 +49,8 @@ export const processMultiCoachTurn = async (
     Coach 1 said: "${coach1Text}".
     Focus on tone and assertiveness. Speak directly to the user. Keep it brief (max 35 words).`,
     config: {
-      systemInstruction: "You are Coach 2, a Confidence Coach. You focus on the user's emotional presence."
+      systemInstruction: "You are Coach 2, a Confidence Coach. You focus on the user's emotional presence.",
+      thinkingConfig: { thinkingBudget: 0 } // Speed optimization
     }
   });
   coach2Text = c2Response.text || "You sound capable, but let's push for more vocal clarity.";
@@ -63,7 +65,8 @@ export const processMultiCoachTurn = async (
     Coach 2: "${coach2Text}"
     Provide exactly 3 quick actionable steps. Max 50 words.`,
     config: {
-      systemInstruction: "You are Coach 3, the Synthesis Coach. You provide the final wrap-up."
+      systemInstruction: "You are Coach 3, the Synthesis Coach. You provide the final wrap-up.",
+      thinkingConfig: { thinkingBudget: 0 } // Speed optimization
     }
   });
   coach3Text = c3Response.text || "Next steps: focus on your breathing, use more direct verbs, and maintain this volume.";
@@ -81,6 +84,7 @@ export const processMultiCoachTurn = async (
       contents: [{ parts: [{ text: ttsPrompt }] }],
       config: {
         responseModalities: [Modality.AUDIO],
+        thinkingConfig: { thinkingBudget: 0 }, // Speed optimization
         speechConfig: {
           multiSpeakerVoiceConfig: {
             speakerVoiceConfigs: [

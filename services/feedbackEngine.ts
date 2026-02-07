@@ -41,12 +41,12 @@ export const generateSessionAnalysis = async (
   `;
 
   try {
-      // Always use 'gemini-3-flash-preview' for basic text tasks like feedback analysis
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
+          thinkingConfig: { thinkingBudget: 0 }, // Speed optimization
           responseSchema: {
             type: Type.OBJECT,
             properties: {

@@ -76,12 +76,12 @@ export const fetchDailyRecommendations = async (
   `;
 
   try {
-    // Basic Text Task: Use gemini-3-flash-preview
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
+        thinkingConfig: { thinkingBudget: 0 }, // Speed optimization
         responseSchema: {
             type: Type.ARRAY,
             items: {
@@ -111,7 +111,6 @@ export const fetchDailyRecommendations = async (
 
   } catch (e) {
     console.error("Failed to generate recommendations", e);
-    // Return empty to allow fallback in UI or fallback resources
     return [];
   }
 };
@@ -144,6 +143,9 @@ export const generateResourceContent = async (resource: Resource, apiKey: string
             const response = await ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
                 contents: prompt,
+                config: {
+                    thinkingConfig: { thinkingBudget: 0 } // Speed optimization
+                }
             });
             content.text = response.text || "Content generation failed.";
         } 
@@ -170,6 +172,7 @@ export const generateResourceContent = async (resource: Resource, apiKey: string
                 contents: [{ parts: [{ text: prompt }] }],
                 config: {
                     responseModalities: [Modality.AUDIO],
+                    thinkingConfig: { thinkingBudget: 0 }, // Speed optimization
                     speechConfig: {
                         multiSpeakerVoiceConfig: {
                             speakerVoiceConfigs: [
@@ -188,9 +191,6 @@ export const generateResourceContent = async (resource: Resource, apiKey: string
             }
         }
         else if (resource.type === 'video') {
-            // Video Simulation: 1. Audio (Narration) 2. Visual (Thumbnail)
-            
-            // 1. Script & Audio
             const scriptPrompt = `
             You are recording a video lesson for "${resource.title}".
             Write the narration script.
@@ -211,8 +211,9 @@ export const generateResourceContent = async (resource: Resource, apiKey: string
                 contents: [{ parts: [{ text: scriptPrompt }] }],
                 config: {
                     responseModalities: [Modality.AUDIO],
+                    thinkingConfig: { thinkingBudget: 0 }, // Speed optimization
                     speechConfig: {
-                         voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } } // Deep authoritative voice
+                         voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } } 
                     }
                 }
             });
@@ -223,7 +224,6 @@ export const generateResourceContent = async (resource: Resource, apiKey: string
                 content.audioUrl = URL.createObjectURL(wavBlob);
             }
 
-            // 2. Thumbnail
             const imagePrompt = `
             A modern, flat vector illustration for a video thumbnail about "${resource.title}".
             Style: Corporate Memphis, minimal, vibrant colors (Blue, Orange, White).
@@ -237,7 +237,6 @@ export const generateResourceContent = async (resource: Resource, apiKey: string
                     contents: { parts: [{ text: imagePrompt }] },
                 });
                 
-                // Iterate parts to find image data as per guidelines
                 const parts = imageResponse.candidates?.[0]?.content?.parts;
                 let imageData;
                 if (parts) {

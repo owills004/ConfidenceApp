@@ -9,12 +9,12 @@ export type GroundingCallback = (metadata: any) => void;
 export type AnalysisCallback = (emotion: string, intent: string) => void;
 export type BreathCallback = (phase: 'IN' | 'HOLD' | 'OUT' | 'END') => void;
 
-const ANALYSIS_REGEX = /\[\[E:(\w+)\]\](?:\[\[I:(\w+)\]\])?/;
-const BREATH_REGEX = /\[\[B:(\w+)\]\]/;
+const ANALYSIS_REGEX = /\[\[E:([^\]]+)\]\](?:\[\[I:([^\]]+)\]\])?/g;
+const BREATH_REGEX = /\[\[B:(\w+)\]\]/g;
 
 export class LiveClient {
   private ai: GoogleGenAI;
-  private model: string = 'gemini-2.5-flash-native-audio-preview-09-2025';
+  private model: string = 'gemini-2.5-flash-native-audio-preview-12-2025';
   private inputAudioContext: AudioContext | null = null;
   private outputAudioContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
@@ -30,13 +30,14 @@ export class LiveClient {
   
   // Recording Mastering Chain
   private recordingProcessor: ScriptProcessorNode | null = null;
+  private recordingHighPass: BiquadFilterNode | null = null;
   private recordingCompressor: DynamicsCompressorNode | null = null;
+  private recordingLimiter: DynamicsCompressorNode | null = null;
   private recordedChunks: Float32Array[] = [];
   private isRecording: boolean = false;
 
   // Analysis State
   private currentModelTurnText: string = '';
-  private hasEmittedAnalysisForTurn: boolean = false;
 
   // Callbacks
   private onTranscript: TranscriptCallback;
@@ -101,7 +102,7 @@ export class LiveClient {
           systemInstruction: systemInstruction,
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          tools: [{ googleSearch: {} }]
+          thinkingConfig: { thinkingBudget: 0 } 
         },
         callbacks: {
           onopen: () => {
@@ -127,17 +128,28 @@ export class LiveClient {
   private setupRecorder() {
     if (!this.outputAudioContext || !this.mediaStream) return;
 
-    // 1. Create a mastering chain for the recording to balance voice levels
-    this.recordingCompressor = this.outputAudioContext.createDynamicsCompressor();
-    // Configure for high-quality speech mastering
-    this.recordingCompressor.threshold.setValueAtTime(-24, this.outputAudioContext.currentTime);
-    this.recordingCompressor.knee.setValueAtTime(30, this.outputAudioContext.currentTime);
-    this.recordingCompressor.ratio.setValueAtTime(12, this.outputAudioContext.currentTime);
-    this.recordingCompressor.attack.setValueAtTime(0.003, this.outputAudioContext.currentTime);
-    this.recordingCompressor.release.setValueAtTime(0.25, this.outputAudioContext.currentTime);
+    const now = this.outputAudioContext.currentTime;
 
-    // 2. Setup the processor that captures raw Float32 data
-    this.recordingProcessor = this.outputAudioContext.createScriptProcessor(4096, 1, 1);
+    this.recordingHighPass = this.outputAudioContext.createBiquadFilter();
+    this.recordingHighPass.type = 'highpass';
+    this.recordingHighPass.frequency.setValueAtTime(80, now);
+    this.recordingHighPass.Q.setValueAtTime(0.7, now);
+
+    this.recordingCompressor = this.outputAudioContext.createDynamicsCompressor();
+    this.recordingCompressor.threshold.setValueAtTime(-18, now);
+    this.recordingCompressor.knee.setValueAtTime(12, now);
+    this.recordingCompressor.ratio.setValueAtTime(4, now);
+    this.recordingCompressor.attack.setValueAtTime(0.01, now);
+    this.recordingCompressor.release.setValueAtTime(0.2, now);
+
+    this.recordingLimiter = this.outputAudioContext.createDynamicsCompressor();
+    this.recordingLimiter.threshold.setValueAtTime(-2, now);
+    this.recordingLimiter.knee.setValueAtTime(0, now);
+    this.recordingLimiter.ratio.setValueAtTime(20, now);
+    this.recordingLimiter.attack.setValueAtTime(0.001, now);
+    this.recordingLimiter.release.setValueAtTime(0.05, now);
+
+    this.recordingProcessor = this.outputAudioContext.createScriptProcessor(2048, 1, 1);
     this.recordedChunks = [];
     this.isRecording = true;
 
@@ -148,22 +160,39 @@ export class LiveClient {
       }
     };
 
-    // 3. Chain: Sources -> Compressor -> Processor
     const micSource = this.outputAudioContext.createMediaStreamSource(this.mediaStream);
     const micGain = this.outputAudioContext.createGain();
     micGain.gain.value = 1.0; 
     
     micSource.connect(micGain);
-    micGain.connect(this.recordingCompressor);
-    
-    this.recordingCompressor.connect(this.recordingProcessor);
-    // Note: Processor needs a destination connection to keep ticking
+    micGain.connect(this.recordingHighPass);
+    this.recordingHighPass.connect(this.recordingCompressor);
+    this.recordingCompressor.connect(this.recordingLimiter);
+    this.recordingLimiter.connect(this.recordingProcessor);
     this.recordingProcessor.connect(this.outputAudioContext.destination);
   }
 
   public getSessionRecording(): globalThis.Blob | null {
     if (this.recordedChunks.length === 0) return null;
-    // Export at output sample rate (24k) for consistent voice quality
+
+    let maxVal = 0;
+    for (const chunk of this.recordedChunks) {
+      for (let i = 0; i < chunk.length; i++) {
+        const absVal = Math.abs(chunk[i]);
+        if (absVal > maxVal) maxVal = absVal;
+      }
+    }
+
+    const targetPeak = 0.9;
+    if (maxVal > 0) {
+      const scale = targetPeak / maxVal;
+      for (const chunk of this.recordedChunks) {
+        for (let i = 0; i < chunk.length; i++) {
+          chunk[i] *= scale;
+        }
+      }
+    }
+
     return float32ToWav(this.recordedChunks, AUDIO_SAMPLE_RATE_OUTPUT);
   }
 
@@ -205,7 +234,7 @@ export class LiveClient {
     if (!this.inputAudioContext || !this.mediaStream || !this.inputAnalyser) return;
 
     this.source = this.inputAudioContext.createMediaStreamSource(this.mediaStream);
-    this.processor = this.inputAudioContext.createScriptProcessor(4096, 1, 1);
+    this.processor = this.inputAudioContext.createScriptProcessor(2048, 1, 1);
 
     this.processor.onaudioprocess = (e) => {
       const inputData = e.inputBuffer.getChannelData(0);
@@ -235,22 +264,18 @@ export class LiveClient {
     if (modelTranscriptChunk) {
        this.currentModelTurnText += modelTranscriptChunk;
        
-       // Handle Breath Tags
-       const breathMatch = this.currentModelTurnText.match(BREATH_REGEX);
-       if (breathMatch) {
-         this.onBreath(breathMatch[1] as any);
-         // Clear tag so it doesn't match again immediately in this turn
-         this.currentModelTurnText = this.currentModelTurnText.replace(BREATH_REGEX, '');
+       // Detect and emit emotion/intent analysis from chunk
+       let analysisMatch;
+       const analysisRegexClone = new RegExp(ANALYSIS_REGEX); // Reset index
+       while ((analysisMatch = analysisRegexClone.exec(this.currentModelTurnText)) !== null) {
+         this.onAnalysis(analysisMatch[1], analysisMatch[2] || 'Neutral');
        }
 
-       if (!this.hasEmittedAnalysisForTurn) {
-          const match = this.currentModelTurnText.match(ANALYSIS_REGEX);
-          if (match) {
-            const emotion = match[1];
-            const intent = match[2] || 'Neutral';
-            this.onAnalysis(emotion, intent);
-            this.hasEmittedAnalysisForTurn = true;
-          }
+       // Handle Breath Tags
+       let breathMatch;
+       const breathRegexClone = new RegExp(BREATH_REGEX);
+       while ((breathMatch = breathRegexClone.exec(this.currentModelTurnText)) !== null) {
+         this.onBreath(breathMatch[1] as any);
        }
 
        this.onTranscript(modelTranscriptChunk, false, !!message.serverContent?.turnComplete);
@@ -267,7 +292,6 @@ export class LiveClient {
 
     if (message.serverContent?.turnComplete) {
        this.currentModelTurnText = '';
-       this.hasEmittedAnalysisForTurn = false;
     }
   }
 
@@ -283,8 +307,10 @@ export class LiveClient {
     source.buffer = buffer;
     
     source.connect(this.outputAnalyser);
-    // Connect AI response to the mastered recording chain
-    source.connect(this.recordingCompressor);
+    
+    if (this.recordingHighPass) {
+      source.connect(this.recordingHighPass);
+    }
     
     source.addEventListener('ended', () => {
       this.activeSources.delete(source);
@@ -331,9 +357,17 @@ export class LiveClient {
       this.recordingProcessor.disconnect();
       this.recordingProcessor = null;
     }
+    if (this.recordingHighPass) {
+      this.recordingHighPass.disconnect();
+      this.recordingHighPass = null;
+    }
     if (this.recordingCompressor) {
       this.recordingCompressor.disconnect();
       this.recordingCompressor = null;
+    }
+    if (this.recordingLimiter) {
+      this.recordingLimiter.disconnect();
+      this.recordingLimiter = null;
     }
     if (this.source) {
       this.source.disconnect();
